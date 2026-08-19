@@ -10,6 +10,7 @@ root.after 的 marshal 死锁风险）。
 
 import os
 import sys
+import time
 import queue
 import threading
 from typing import Optional
@@ -55,6 +56,7 @@ class App(object):
         self._wait_cancellable = False
         self._cancel = threading.Event()   # 手动同步的取消信号
         self._prog_count = 0
+        self._last_prog_ts = 0.0           # P3: 进度节流上次投递时间戳
         self._closing = False
         self._tick_id = None               # type: Optional[str]
         self._drain_id = None              # type: Optional[str]
@@ -242,14 +244,19 @@ class App(object):
             return
         self._cancel.clear()
         self._prog_count = 0
+        self._last_prog_ts = 0.0
         self._show_wait("正在扫描并对比差异...", cancellable=True)
         threading.Thread(target=self._diff_worker, args=(task,), daemon=True).start()
 
     def _progress_cb(self, rel):
         # type: (str) -> None
-        # worker 线程调用：节流后经 UI 队列刷新等待窗进度标签
-        self._prog_count += 1
-        if self._prog_count % 20 == 0:
+        # worker 线程调用：时间节流（≥500ms 才投递一次）后经 UI 队列刷新等待窗进度。
+        # P3 修复：此前按"每 20 项"计数节流，10 万级目录会向 UI 队列投递数千次，
+        # drain 每 100ms 只消费 100 个导致积压卡顿；时间节流与扫描速度无关。
+        now = time.time()
+        if now - self._last_prog_ts >= 0.5:
+            self._last_prog_ts = now
+            self._prog_count += 1
             short = rel if len(rel) <= 60 else ("..." + rel[-57:])
             n = self._prog_count
             self._ui_put(lambda: self._set_wait_progress("已扫描 %d 项：%s" % (n, short)))

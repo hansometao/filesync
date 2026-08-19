@@ -111,10 +111,13 @@ def run_cli(argv, app_dir=None):
 
     key = argv[1] if len(argv) > 1 else ""
     task = None
-    for t in store.tasks:
-        if t.id == key or t.name == key:
-            task = t
-            break
+    if key:
+        # P1 修复：--list 显示 8 位短 ID，--sync 需支持前缀匹配（README 承诺
+        # ID 可用 --list 查看后直接使用）；空 key 不匹配任何任务，避免误触发
+        for t in store.tasks:
+            if t.id == key or t.id.startswith(key) or t.name == key:
+                task = t
+                break
     if task is None:
         print("未找到任务: %r（用 --list 查看已有任务）" % key)
         return 1
@@ -122,8 +125,17 @@ def run_cli(argv, app_dir=None):
         print("任务 '%s' 已禁用，跳过执行（可在 GUI 中启用）" % task.name)
         return 1
 
+    # P1 修复：CLI 与 GUI 一致地排除工具自身 config/logs/baseline 目录，
+    # 避免把工具自己同步进备份（此前仅 GUI 路径排除）
+    cfg_dir = os.path.dirname(store.path)
+    self_paths = {
+        os.path.abspath(os.path.join(app_dir, "logs")),
+        os.path.abspath(cfg_dir),
+        os.path.abspath(os.path.join(cfg_dir, "baseline")),
+    }
+
     try:
-        res = perform_sync(task)
+        res = perform_sync(task, self_paths=self_paths)
     except Exception as e:
         # 无头模式任何业务异常都要可控退出，避免未捕获 traceback
         print("同步失败 [%s]: %s" % (task.name, e))
