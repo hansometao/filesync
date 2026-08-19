@@ -22,7 +22,7 @@ from config import (
     Task, TaskStore, MODE_ONE_WAY, MODE_TWO_WAY, CONFLICT_ASK,
 )
 from scheduler import Scheduler
-from sync_engine import perform_sync, apply_diff
+from sync_engine import perform_sync, apply_diff, finalize_sync
 from scanner import ScanCancelled
 from logger import init_logger
 from utils.paths import longpath, app_dir
@@ -78,6 +78,7 @@ class App(object):
         self._ui_queue.put(fn)
 
     def _drain_ui_queue(self):
+        # type: () -> None
         # 顶部续期：即使本批次 fn() 抛异常或进入模态嵌套主循环（wait_window），
         # drain 链也不会断——嵌套主循环同样处理 after 事件，日志面板持续刷新，
         # 且 on_close 期间入队的 _finish_close 仍会被投递（避免窗口看似卡死）。
@@ -103,6 +104,7 @@ class App(object):
 
     # ---------- UI 构建 ----------
     def _build_ui(self):
+        # type: () -> None
         self.root.title("文件夹同步备份工具  v1.1")
         self.root.geometry("900x620")
 
@@ -150,6 +152,7 @@ class App(object):
 
     # ---------- 任务列表 ----------
     def _refresh_tasks(self, full=False):
+        # type: (bool) -> None
         # full=False（默认）：仅更新 next/status/last 三列，不删行，保留选中态，避免闪烁。
         # full=True：任务增删改/调度启停时整体重建树。
         running = self.scheduler.running
@@ -184,6 +187,7 @@ class App(object):
 
     # ---------- 任务增删改 ----------
     def _on_add(self):
+        # type: () -> None
         from gui_task_dialog import TaskDialog
         dlg = TaskDialog(self.root, None, self.store)
         self.root.wait_window(dlg)
@@ -193,6 +197,7 @@ class App(object):
             self._maybe_autostart()
 
     def _on_edit(self):
+        # type: () -> None
         from gui_task_dialog import TaskDialog
         task = self._selected_task()
         if task is None:
@@ -213,6 +218,7 @@ class App(object):
             self.scheduler.release(task.id)
 
     def _on_delete(self):
+        # type: () -> None
         task = self._selected_task()
         if task is None:
             messagebox.showinfo("提示", "请先选择要删除的任务")
@@ -230,6 +236,7 @@ class App(object):
 
     # ---------- 同步预览/执行 ----------
     def _on_sync_now(self):
+        # type: () -> None
         task = self._selected_task()
         if task is None:
             messagebox.showinfo("提示", "请先选择要同步的任务")
@@ -326,11 +333,8 @@ class App(object):
             out = apply_diff(task, res["diff"], conflict_policy=policy,
                              self_paths=self.self_paths, logger=self.logger,
                              cancel_event=self._cancel, dst_snap=res.get("dst_snap"))
-            # 逐文件审计轨迹（apply_diff 返回的动作日志），让「完整清单见日志」可查
-            for ln in (out or {}).get("logs", []):
-                self.logger.info(ln)
-            self.store.update_runtime(task)
-            self.store.save_baseline(task)
+            # 统一收尾：审计日志 + 运行期字段 + baseline（与 CLI 路径共用同一实现）
+            finalize_sync(task, out, self.store, self.logger)
             self._ui_put(self._hide_wait)
             self._ui_put(lambda: messagebox.showinfo("完成", "同步完成：%s" % task.last_summary))
         except ScanCancelled:
@@ -352,16 +356,14 @@ class App(object):
         # type: (Task) -> None
         try:
             res = perform_sync(task, logger=self.logger, self_paths=self.self_paths)
-            for ln in (res or {}).get("logs", []):
-                self.logger.info(ln)
-            self.store.update_runtime(task)
-            self.store.save_baseline(task)
+            finalize_sync(task, res, self.store, self.logger)
         except Exception as e:
             self.logger.error("任务执行异常 [%s]: %s" % (task.name, e))
         finally:
             self._ui_put(self._refresh_tasks)
 
     def _toggle_scheduler(self):
+        # type: () -> None
         if self.scheduler.running:
             self.scheduler.stop()
         else:
@@ -369,6 +371,7 @@ class App(object):
         self._refresh_tasks(full=True)
 
     def _maybe_autostart(self):
+        # type: () -> None
         has_sched = any(t.schedule.enabled and t.enabled for t in self.store.tasks)
         if has_sched and not self.scheduler.running:
             self.scheduler.start()
@@ -376,10 +379,12 @@ class App(object):
 
     # ---------- 日志面板 ----------
     def _on_log(self, level, line):
+        # type: (str, str) -> None
         # logger 回调可能在任意线程：只入队，主线程渲染
         self._ui_put(lambda: self._append_log(line, level))
 
     def _append_log(self, line, level):
+        # type: (str, str) -> None
         self.log_text.configure(state=tk.NORMAL)
         self.log_text.insert(tk.END, line + "\n")
         # 限制行数，避免长时间运行内存无限增长
@@ -389,6 +394,7 @@ class App(object):
         self.log_text.see(tk.END)
 
     def _load_log_history(self):
+        # type: () -> None
         path = os.path.join(LOG_DIR, "foldersync.log")
         if not os.path.exists(path):
             return
@@ -406,6 +412,7 @@ class App(object):
 
     # ---------- 等待提示（含进度与取消） ----------
     def _show_wait(self, msg, cancellable=False):
+        # type: (str, bool) -> None
         if self._wait is not None:
             try:
                 if self._wait.winfo_exists():
@@ -437,6 +444,7 @@ class App(object):
         self._wait.geometry("+%d+%d" % (self.root.winfo_x() + 200, self.root.winfo_y() + 200))
 
     def _set_wait_progress(self, text):
+        # type: (str) -> None
         if self._wait is not None and self._wait_prog is not None:
             try:
                 self._wait_prog.config(text=text)
@@ -444,11 +452,13 @@ class App(object):
                 pass
 
     def _on_wait_close(self):
+        # type: () -> None
         # 点 X 关闭等待窗：可取消则等同取消；不可取消则忽略关闭（保持模态不被误关）
         if self._wait_cancellable:
             self._on_cancel_wait()
 
     def _on_cancel_wait(self):
+        # type: () -> None
         self._cancel.set()
         if self._wait is not None and self._wait_prog is not None:
             try:
@@ -457,6 +467,7 @@ class App(object):
                 pass
 
     def _hide_wait(self):
+        # type: () -> None
         if self._wait is not None:
             try:
                 if self._wait_bar is not None:
@@ -483,6 +494,7 @@ class App(object):
                 messagebox.showinfo("日志目录", d)
 
     def _tick(self):
+        # type: () -> None
         if self._closing:
             return
         self._refresh_tasks(full=False)
@@ -492,6 +504,7 @@ class App(object):
             pass
 
     def on_close(self):
+        # type: () -> None
         if self._closing:
             return
         self._closing = True
@@ -506,6 +519,7 @@ class App(object):
         # 等待收尾放到后台线程（有界），主线程保持事件循环处理 UI 队列；
         # 完成后经队列回到主线程销毁窗口，避免长时间冻结界面
         def _shutdown():
+            # type: () -> None
             try:
                 self.scheduler.wait_workers(5)
             finally:
@@ -513,6 +527,7 @@ class App(object):
         threading.Thread(target=_shutdown, daemon=True).start()
 
     def _finish_close(self):
+        # type: () -> None
         # 先取消周期性 after，避免 destroy 后残留回调触发
         # "invalid command name" 的 background error
         for aid in (self._tick_id, self._drain_id):

@@ -83,12 +83,14 @@ def _matched(name, rel, patterns):
 
 
 def _included(rel, name, include):
+    # type: (str, str, List[str]) -> bool
     if not include:
         return True
     return _matched(name, rel, include)
 
 
 def _excluded(rel, name, exclude):
+    # type: (str, str, List[str]) -> bool
     return _matched(name, rel, exclude)
 
 

@@ -9,6 +9,7 @@
 import os
 import json
 import time
+import re
 import shutil
 import threading
 import uuid
@@ -35,6 +36,36 @@ CONFLICT_POLICIES = [
 SCHED_INTERVAL = "interval"
 SCHED_DAILY = "daily"
 SCHED_WEEKLY = "weekly"
+
+
+def validate_schedule_input(sched_enabled, sched_type, interval_text, times_text, weekdays_text):
+    # type: (bool, str, str, str, str) -> Optional[str]
+    """校验任务调度表单输入（interval / times / weekdays）。
+
+    返回错误消息；None 表示合法。GUI（gui_task_dialog._on_save）与无头测试共用，
+    把校验逻辑从 tkinter 层抽离以便无界面测试。只做校验不做解析，
+    调用方在通过后按既有逻辑解析（格式已保证合法）。
+    """
+    try:
+        interval = int(interval_text)
+    except ValueError:
+        return "间隔(分钟)必须是整数，当前值：%s" % interval_text
+    if interval < 1:
+        return "间隔(分钟)必须是正整数（>=1）"
+    times = [t.strip() for t in times_text.split(",") if t.strip()]
+    for t in times:
+        if not re.match(r"^([01]?\d|2[0-3]):[0-5]\d$", t):
+            return "每日时刻格式应为 HH:MM（00:00-23:59），非法值：%s" % t
+    if sched_enabled and sched_type in (SCHED_DAILY, SCHED_WEEKLY) and not times:
+        return "启用每日/每周定时时请至少填写一个时刻，如 08:00,20:00"
+    weekdays = []
+    for w in [x.strip() for x in weekdays_text.split(",") if x.strip()]:
+        if not re.match(r"^[1-7]$", w):
+            return "每周(1-7)应为 1-7 的数字（1=周一…7=周日），非法值：%s" % w
+        weekdays.append(int(w))
+    if sched_enabled and sched_type == SCHED_WEEKLY and not weekdays:
+        return "启用每周定时时请至少填写一个周几，如 1,3,5（1=周一）"
+    return None
 
 
 @dataclass
@@ -197,7 +228,7 @@ class TaskStore(object):
             pass
 
     def load(self):
-        # 清理崩溃残留的 .tmp（原子写 write-tmp 后、os.replace 前被中断）。
+        # type: () -> None
         # 此时 self.path 仍是上一次的完好版本，删 tmp 无副作用。
         try:
             tmp = self.path + ".tmp"
@@ -234,6 +265,7 @@ class TaskStore(object):
             self.save()  # 重写 tasks.json，剥离内嵌 baseline
 
     def save(self):
+        # type: () -> None
         with self._lock:
             try:
                 d = os.path.dirname(self.path)

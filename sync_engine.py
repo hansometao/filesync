@@ -47,6 +47,7 @@ class Action(object):
         self.is_conflict = is_conflict
 
     def __repr__(self):
+        # type: () -> str
         return "<Action %s %s>" % (self.kind, self.rel)
 
 
@@ -71,6 +72,7 @@ class DiffResult(object):
             self.extra_count += 1
 
     def is_empty(self):
+        # type: () -> bool
         return len(self.actions) == 0
 
     def summary(self):
@@ -334,6 +336,7 @@ def _resolve_conflict(action, policy, on_ask=None):
 
 
 def _safe_mtime(path):
+    # type: (str) -> Optional[float]
     try:
         return os.path.getmtime(longpath(path))
     except OSError:
@@ -538,3 +541,19 @@ def perform_sync(task, logger=None, conflict_override=None, dry_run=False,
     res["src_snap"] = src_snap
     res["dst_snap"] = dst_snap
     return res
+
+
+def finalize_sync(task, result, store, logger=None):
+    # type: (Task, Dict[str, Any], Any, Any) -> None
+    """同步完成后的统一收尾：审计日志入库 + 持久化运行期字段与 baseline。
+
+    CLI（main.run_cli）与 GUI（gui_app._run_task/_apply_worker）共用，
+    消除两处重复实现带来的行为漂移风险。异常路径不调用本函数：
+    同步未完成时不更新 baseline（由下次同步重扫兜底）。
+    """
+    if logger is None:
+        logger = get_logger()
+    for ln in (result or {}).get("logs", []):
+        logger.info(ln)
+    store.update_runtime(task)
+    store.save_baseline(task)

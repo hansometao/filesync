@@ -43,6 +43,7 @@ class AppLogger(object):
             self._file = None
 
     def _reopen(self):
+        # type: () -> None
         # 轮转：超过阈值则备份为 .1
         try:
             if os.path.exists(self._path) and os.path.getsize(self._path) > _MAX_FILE_BYTES:
@@ -121,18 +122,23 @@ class AppLogger(object):
             self._file = None
 
     def debug(self, msg):
+        # type: (str) -> None
         self._emit(LEVEL_DEBUG, msg)
 
     def info(self, msg):
+        # type: (str) -> None
         self._emit(LEVEL_INFO, msg)
 
     def warn(self, msg):
+        # type: (str) -> None
         self._emit(LEVEL_WARN, msg)
 
     def error(self, msg):
+        # type: (str) -> None
         self._emit(LEVEL_ERROR, msg)
 
     def close(self):
+        # type: () -> None
         with self._lock:
             if self._file is not None:
                 try:
@@ -143,6 +149,7 @@ class AppLogger(object):
 
 
 def ensure_dir_safe(path):
+    # type: (str) -> None
     try:
         lp = longpath(path)
         if not os.path.isdir(lp):

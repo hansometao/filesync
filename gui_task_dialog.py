@@ -1,13 +1,13 @@
 """新增 / 编辑任务对话框。"""
 
 import os
-import re
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 from config import (
     Task, MODE_ONE_WAY, MODE_TWO_WAY,
     SCHED_INTERVAL, SCHED_DAILY, SCHED_WEEKLY,
+    validate_schedule_input,
     CONFLICT_POLICIES, CONFLICT_NEWER, CONFLICT_SOURCE,
     CONFLICT_TARGET, CONFLICT_SKIP, CONFLICT_ASK,
 )
@@ -47,12 +47,14 @@ class TaskDialog(tk.Toplevel):
             self._load(task)
 
     def _row(self, parent, row, label, widget, btn=None):
+        # type: (tk.Widget, int, str, tk.Widget, object) -> None
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky=tk.W, padx=4, pady=3)
         widget.grid(row=row, column=1, sticky=tk.EW, padx=4, pady=3)
         if btn is not None:
             btn.grid(row=row, column=2, padx=4, pady=3)
 
     def _build(self):
+        # type: () -> None
         frm = ttk.Frame(self, padding=10)
         frm.pack(fill=tk.BOTH, expand=True)
         frm.columnconfigure(1, weight=1)
@@ -112,6 +114,7 @@ class TaskDialog(tk.Toplevel):
 
         # 双向时禁用单向删除勾选，反之亦然（UI 友好，不强制）
         def _on_mode(*_):
+            # type: (*object) -> None
             if self._mode.get() == _MODE_LABELS[MODE_TWO_WAY]:
                 self._ow_del_chk.configure(state=tk.DISABLED)
             else:
@@ -119,12 +122,14 @@ class TaskDialog(tk.Toplevel):
         self._mode.bind("<<ComboboxSelected>>", _on_mode)
 
     def _pick(self, entry):
+        # type: (tk.Entry) -> None
         d = filedialog.askdirectory()
         if d:
             entry.delete(0, tk.END)
             entry.insert(0, d)
 
     def _load(self, task):
+        # type: (Task) -> None
         self._name.insert(0, task.name)
         self._src.insert(0, task.source)
         self._dst.insert(0, task.target)
@@ -149,6 +154,7 @@ class TaskDialog(tk.Toplevel):
             self._ow_del_chk.configure(state=tk.DISABLED)
 
     def _on_save(self):
+        # type: () -> None
         name = self._name.get().strip()
         src = self._src.get().strip()
         dst = self._dst.get().strip()
@@ -179,48 +185,21 @@ class TaskDialog(tk.Toplevel):
         except ValueError:
             pass  # Windows 不同盘符等，不可能互为子路径
 
-        # M-10：interval 必须为正整数，非法则报错，不再静默 coerce
-        try:
-            interval = int(self._interval.get())
-        except ValueError:
-            messagebox.showerror(
-                "错误", "间隔(分钟)必须是整数，当前值：%s" % self._interval.get())
-            return
-        if interval < 1:
-            messagebox.showerror("错误", "间隔(分钟)必须是正整数（>=1）")
+        # 调度输入校验：interval/times/weekdays 抽为纯函数 validate_schedule_input
+        # （无 tkinter 依赖，可无头测试），此处仅负责错误弹窗展示
+        err = validate_schedule_input(
+            bool(self._sched_on.get()), self._sched_type.get(),
+            self._interval.get(), self._times.get(), self._weekdays.get())
+        if err:
+            messagebox.showerror("错误", err)
             return
 
+        # 校验已保证格式合法，按既有逻辑解析（times/weekdays 为空时得到空列表）
+        interval = int(self._interval.get())
         times = [t.strip() for t in self._times.get().split(",") if t.strip()]
         include = [t.strip() for t in self._include.get().split(",") if t.strip()]
         exclude = [t.strip() for t in self._exclude.get().split(",") if t.strip()]
-
-        # M-9/H2：每日时刻必须合法 HH:MM。只要填了时刻就校验（不限于「启用定时 + daily」），
-        # 防止手改 JSON / 旧构建写入非法时刻后在调度线程被静默跳过。
-        if times:
-            bad = [t for t in times if not re.match(r"^([01]?\d|2[0-3]):[0-5]\d$", t)]
-            if bad:
-                messagebox.showerror(
-                    "错误", "每日时刻格式应为 HH:MM（00:00-23:59），非法值：%s" % ",".join(bad))
-                return
-        # P2 修复：daily 与 weekly 都依赖 times（周定时 = 周几×时刻组合），
-        # 启用时缺时刻会静默失效（next_*_times 返回 None），必须拦截
-        if self._sched_on.get() and self._sched_type.get() in (SCHED_DAILY, SCHED_WEEKLY) and not times:
-            messagebox.showerror("错误", "启用每日/每周定时时请至少填写一个时刻，如 08:00,20:00")
-            return
-
-        # 每周定时：周几必须为 1-7（1=周一 … 7=周日），逗号分隔
-        weekdays_raw = [w.strip() for w in self._weekdays.get().split(",") if w.strip()]
-        weekdays = []
-        if weekdays_raw:
-            for w in weekdays_raw:
-                if not re.match(r"^[1-7]$", w):
-                    messagebox.showerror(
-                        "错误", "每周(1-7)应为 1-7 的数字（1=周一…7=周日），非法值：%s" % w)
-                    return
-            weekdays = [int(w) for w in weekdays_raw]
-        if self._sched_on.get() and self._sched_type.get() == SCHED_WEEKLY and not weekdays:
-            messagebox.showerror("错误", "启用每周定时时请至少填写一个周几，如 1,3,5（1=周一）")
-            return
+        weekdays = [int(w) for w in self._weekdays.get().split(",") if w.strip()]
 
         if self.is_new:
             t = Task()
@@ -245,5 +224,6 @@ class TaskDialog(tk.Toplevel):
         self.destroy()
 
     def _on_cancel(self):
+        # type: () -> None
         self.result = None
         self.destroy()

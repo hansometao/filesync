@@ -56,6 +56,7 @@ class DiffDialog(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
 
     def _build(self):
+        # type: () -> None
         frm = ttk.Frame(self, padding=8)
         frm.pack(fill=tk.BOTH, expand=True)
 
@@ -122,6 +123,7 @@ class DiffDialog(tk.Toplevel):
         ttk.Button(btn, text="取消", command=self._on_cancel).pack(side=tk.RIGHT, padx=4)
 
     def _on_confirm(self):
+        # type: () -> None
         if not self.diff.actions:
             self.result_policy = "_noop_"
             self.destroy()
@@ -130,5 +132,6 @@ class DiffDialog(tk.Toplevel):
         self.destroy()
 
     def _on_cancel(self):
+        # type: () -> None
         self.result_policy = None
         self.destroy()

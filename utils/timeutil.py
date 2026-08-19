@@ -12,11 +12,13 @@ MTIME_TOLERANCE = 2.0
 
 
 def now_epoch():
+    # type: () -> float
     """当前 epoch 秒（浮点）。"""
     return time.time()
 
 
 def format_epoch(epoch, fmt="%Y-%m-%d %H:%M:%S"):
+    # type: (Optional[float], str) -> str
     """把 epoch 秒格式化为可读字符串；None 返回 '-'。"""
     if epoch is None:
         return "-"
@@ -27,6 +29,7 @@ def format_epoch(epoch, fmt="%Y-%m-%d %H:%M:%S"):
 
 
 def is_newer(ma, mb):
+    # type: (Optional[float], Optional[float]) -> bool
     """ma 是否比 mb 更新（考虑容差）。mb 为 None 视为 ma 更新。"""
     if ma is None:
         return False
@@ -36,6 +39,7 @@ def is_newer(ma, mb):
 
 
 def next_daily_times(times, from_epoch):
+    # type: (List[str], float) -> Optional[float]
     """计算每日定时（times 为 ['HH:MM', ...]）的下一次触发 epoch。
 
     返回距离 from_epoch 最近且 >= from_epoch 的那个时刻的 epoch；
@@ -65,6 +69,7 @@ def next_daily_times(times, from_epoch):
 
 
 def next_weekly_times(weekdays, times, from_epoch):
+    # type: (List[int], List[str], float) -> Optional[float]
     """计算每周定时（weekdays 为 [1..7]，1=周一…7=周日）的下一次触发 epoch。
 
     在选中的每个星期几 × 每个时刻组合中，取 >= from_epoch 的最近触发点；
@@ -102,6 +107,7 @@ def next_weekly_times(weekdays, times, from_epoch):
 
 
 def _hms(t):
+    # type: (str) -> Optional[int]
     try:
         hh, mm = t.split(":")
         return int(hh) * 3600 + int(mm) * 60

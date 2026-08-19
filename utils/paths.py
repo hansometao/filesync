@@ -10,6 +10,7 @@ import sys
 
 
 def app_dir():
+    # type: () -> str
     """应用根目录：源码运行=项目根；PyInstaller 打包后=exe 所在目录。
 
     onefile 打包时 ``__file__`` 指向临时解压目录（进程退出即删），
@@ -21,11 +22,13 @@ def app_dir():
 
 
 def is_longpath_supported():
+    # type: () -> bool
     """仅 Windows 需要处理长路径前缀。"""
     return sys.platform == "win32"
 
 
 def longpath(path):
+    # type: (str) -> str
     """把路径转换为可绕过 MAX_PATH 限制的 Windows 扩展路径。
 
     非 Windows 平台返回原路径；已带 ``\\\\?\\`` 前缀则原样返回。
@@ -44,6 +47,7 @@ def longpath(path):
 
 
 def ensure_dir(path):
+    # type: (str) -> None
     """确保目录存在（使用长路径前缀以兼容深层目录）。"""
     lp = longpath(path)
     if not os.path.isdir(lp):
@@ -51,6 +55,7 @@ def ensure_dir(path):
 
 
 def join_rel(root, rel):
+    # type: (str, str) -> str
     """把相对路径（'/' 分隔）拼接回系统路径。"""
     parts = rel.split("/")
     return os.path.join(root, *parts)

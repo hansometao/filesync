@@ -37,6 +37,7 @@ class Scheduler(object):
         self._status_cb = cb
 
     def start(self):
+        # type: () -> None
         if self.running:
             return
         self._stop = False
@@ -48,6 +49,7 @@ class Scheduler(object):
         self.logger.info("调度器已启动")
 
     def stop(self):
+        # type: () -> None
         # 短停：只置位 + 清 next_run + 短暂等待循环线程退出，不在 GUI 线程做长等待
         self._stop = True
         self.running = False
