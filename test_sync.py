@@ -707,6 +707,137 @@ check(validate_schedule_input(True, SCHED_WEEKLY, "60", "09:00", "0,8") is not N
 check(validate_schedule_input(False, SCHED_DAILY, "60", "", "") is None,
       "校验: 未启用定时不强制时刻")
 
+# ---------- 20. utils/paths 路径工具 ----------
+print("[20] utils/paths: app_dir / longpath / ensure_dir / join_rel")
+from utils import paths as _paths
+
+check(os.path.isdir(_paths.app_dir()), "app_dir: 返回存在的应用根目录")
+check(_paths.is_longpath_supported() == (sys.platform == "win32"),
+      "is_longpath_supported: 仅 Windows 为 True")
+check(_paths.longpath("/tmp/abc") == "/tmp/abc" or "/tmp/abc".startswith("\\\\?\\"),
+      "longpath: 非 Windows 原样返回(或 Windows 加前缀)")
+check(_paths.longpath(None) is None, "longpath(None) 原样返回 None")
+p20 = os.path.join(tempfile.mkdtemp(), "a", "b", "c")
+_paths.ensure_dir(p20)
+check(os.path.isdir(p20), "ensure_dir: 递归创建多级目录")
+check(_paths.join_rel("/root", "x/y/z.txt") == os.path.join("/root", "x", "y", "z.txt"),
+      "join_rel: '/' 相对路径拼回系统路径")
+
+# ---------- 21. utils/timeutil 时间工具 ----------
+print("[21] utils/timeutil: format_epoch / is_newer / _hms")
+from utils.timeutil import format_epoch, is_newer, _hms, MTIME_TOLERANCE
+
+check(format_epoch(None) == "-", "format_epoch(None) 返回 '-'")
+check(format_epoch(0.0) != "-", "format_epoch(0) 返回格式化串")
+check(format_epoch(0.0, "%Y") == "1970", "format_epoch: 自定义格式生效")
+check(not is_newer(None, 100.0), "is_newer: ma=None -> False")
+check(is_newer(100.0, None), "is_newer: mb=None -> ma 更新")
+check(is_newer(100.0 + MTIME_TOLERANCE + 0.5, 100.0), "is_newer: 超出容差判更新")
+check(not is_newer(100.0 + MTIME_TOLERANCE, 100.0), "is_newer: 恰在容差内不判更新")
+check(_hms("08:30") == 30600, "_hms: 合法时刻换算秒数")
+check(_hms("25:99") == 95940, "_hms: 数值越界不校验(按公式换算)")
+check(_hms("abc") is None, "_hms: 非时刻格式返回 None")
+
+# ---------- 22. scanner: 过滤 / 排除 / 取消 / 哈希 ----------
+print("[22] scanner: include/exclude/self_paths/取消/hash_file")
+from scanner import scan, hash_file, ScanCancelled
+
+d22 = tempfile.mkdtemp()
+s22 = os.path.join(d22, "src")
+os.makedirs(os.path.join(s22, "sub"))
+write(os.path.join(s22, "a.txt"), "aaa")
+write(os.path.join(s22, "b.log"), "bbb")
+write(os.path.join(s22, "sub", "c.txt"), "ccc")
+write(os.path.join(s22, "sub", "d.tmp"), "ddd")
+res22 = scan(s22, include=["*.txt"])
+check("a.txt" in res22 and "b.log" not in res22 and "sub/c.txt" in res22,
+      "scan: include 过滤仅保留匹配文件")
+res22b = scan(s22, exclude=["*.tmp"])
+check("sub/d.tmp" not in res22b and "a.txt" in res22b, "scan: exclude 过滤排除匹配文件")
+res22c = scan(s22, self_paths=[os.path.join(s22, "sub")])
+check("sub/c.txt" not in res22c, "scan: self_paths 排除指定目录")
+# 保留名不参与扫描
+write(os.path.join(s22, "keep.conflict-abc"), "x")
+write(os.path.join(s22, "res.tmp~"), "x")
+res22d = scan(s22)
+check("keep.conflict-abc" not in res22d and "res.tmp~" not in res22d,
+      "scan: .conflict-* 与 .tmp~ 保留名跳过")
+# 取消事件
+import threading as _thr
+ev = _thr.Event()
+ev.set()
+try:
+    scan(s22, cancel_event=ev)
+    check(False, "scan: cancel 置位应抛 ScanCancelled")
+except ScanCancelled:
+    check(True, "scan: cancel 置位抛 ScanCancelled")
+check(scan(os.path.join(d22, "nonexistent")) == {}, "scan: 目录不存在返回空 dict")
+h1 = hash_file(os.path.join(s22, "a.txt"))
+check(isinstance(h1, str) and len(h1) > 0, "hash_file: 返回哈希串")
+check(hash_file(os.path.join(s22, "a.txt")) == h1, "hash_file: 同内容哈希稳定")
+check(hash_file(os.path.join(d22, "nope.txt")) is None, "hash_file: 文件不存在返回 None")
+
+# ---------- 23. config: Task 序列化往返 + TaskStore 增删改查 ----------
+print("[23] config: Task 往返 / TaskStore update/remove/get")
+from config import TaskStore as _TS, Schedule as _Sched
+
+d23 = os.path.join(tempfile.mkdtemp(), "tasks.json")
+store23 = _TS(d23)
+t23 = fresh_task(MODE_ONE_WAY, "/src", "/dst")
+t23.name = "往返测试"
+t23.exclude = ["*.tmp"]
+t23.schedule.type = "daily"
+t23.schedule.times = ["08:00"]
+back23 = Task.from_dict(t23.to_dict())
+check(back23.name == t23.name and back23.source == t23.source, "Task: to_dict/from_dict 往返")
+check(back23.exclude == ["*.tmp"], "Task: 往返保留 exclude")
+check(back23.schedule.type == "daily" and back23.schedule.times == ["08:00"],
+      "Task: 往返保留嵌套 Schedule")
+check(Task.from_dict({}).id != "", "Task.from_dict: 空 dict 用默认值不崩")
+store23.add(t23)
+check(store23.get(t23.id) is t23, "TaskStore.get: 命中返回对象")
+check(store23.get("no-such") is None, "TaskStore.get: 未命中返回 None")
+# update: 同 id 替换
+t23b = fresh_task(MODE_TWO_WAY, "/src2", "/dst2")
+t23b.id = t23.id
+store23.update(t23b)
+check(store23.get(t23.id) is t23b and len(store23.tasks) == 1, "TaskStore.update: 同 id 替换")
+# update_runtime: 只更新运行期字段
+t23c = fresh_task(MODE_ONE_WAY, "/src3", "/dst3")
+t23c.id = t23.id
+t23c.last_status = "OK"
+t23c.last_summary = "3 个文件"
+store23.update_runtime(t23c)
+cur23 = store23.get(t23.id)
+check(cur23 is t23b and cur23.last_status == "OK" and cur23.last_summary == "3 个文件",
+      "update_runtime: 不整对象覆盖, 只拷运行期字段")
+# remove: 任务 + baseline 文件一并删除
+store23.save_baseline(t23b)
+bp23 = store23._baseline_path(t23.id)
+check(os.path.exists(bp23), "save_baseline: baseline 文件已落盘")
+store23.remove(t23.id)
+check(store23.get(t23.id) is None and not os.path.exists(bp23),
+      "TaskStore.remove: 任务移除且 baseline 清理")
+
+# ---------- 24. logger: 级别方法 + close ----------
+print("[24] logger: debug/info/warn/error 与 close")
+from logger import AppLogger as _AL, LEVEL_DEBUG, LEVEL_INFO, LEVEL_WARN, LEVEL_ERROR
+
+d24 = tempfile.mkdtemp()
+lg = _AL(d24, quiet=True)
+lg.debug("调试")
+lg.info("信息")
+lg.warn("警告")
+lg.error("错误")
+with open(os.path.join(d24, "foldersync.log"), encoding="utf-8") as f:
+    lines24 = f.read()
+check(LEVEL_DEBUG + " 调试" in lines24, "logger.debug 写入文件")
+check(LEVEL_INFO + " 信息" in lines24, "logger.info 写入文件")
+check(LEVEL_WARN + " 警告" in lines24, "logger.warn 写入文件")
+check(LEVEL_ERROR + " 错误" in lines24, "logger.error 写入文件")
+lg.close()
+check(lg._file is None, "logger.close: 句柄置空")
+
 # ---------- 清理 ----------
 print("\n结果：%s" % ("全部通过" if not failures else "%d 项失败" % len(failures)))
 if failures:
