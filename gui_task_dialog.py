@@ -7,8 +7,25 @@ from tkinter import ttk, filedialog, messagebox
 
 from config import (
     Task, MODE_ONE_WAY, MODE_TWO_WAY,
-    SCHED_INTERVAL, SCHED_DAILY, CONFLICT_POLICIES, CONFLICT_NEWER,
+    SCHED_INTERVAL, SCHED_DAILY,
+    CONFLICT_POLICIES, CONFLICT_NEWER, CONFLICT_SOURCE,
+    CONFLICT_TARGET, CONFLICT_SKIP, CONFLICT_ASK,
 )
+
+# 下拉框显示中文标签，保存/加载时与内部值双向映射
+# （标签文案与 gui_diff 的 _POLICY_LABELS 保持一致）
+_MODE_LABELS = {MODE_ONE_WAY: "单向镜像", MODE_TWO_WAY: "双向同步"}
+_SCHED_LABELS = {SCHED_INTERVAL: "间隔定时", SCHED_DAILY: "每日时刻"}
+_POLICY_LABELS = {
+    CONFLICT_NEWER: "新版本胜出",
+    CONFLICT_SOURCE: "源侧胜出",
+    CONFLICT_TARGET: "目标侧胜出",
+    CONFLICT_SKIP: "跳过(不处理)",
+    CONFLICT_ASK: "逐个询问",
+}
+_MODE_REV = {v: k for k, v in _MODE_LABELS.items()}
+_SCHED_REV = {v: k for k, v in _SCHED_LABELS.items()}
+_POLICY_REV = {v: k for k, v in _POLICY_LABELS.items()}
 
 
 class TaskDialog(tk.Toplevel):
@@ -43,16 +60,16 @@ class TaskDialog(tk.Toplevel):
         self._name = ttk.Entry(frm)
         self._src = ttk.Entry(frm)
         self._dst = ttk.Entry(frm)
-        self._mode = ttk.Combobox(frm, values=[MODE_ONE_WAY, MODE_TWO_WAY], state="readonly")
-        self._mode.set(MODE_ONE_WAY)
+        self._mode = ttk.Combobox(frm, values=list(_MODE_LABELS.values()), state="readonly")
+        self._mode.set(_MODE_LABELS[MODE_ONE_WAY])
         self._ow_del = tk.BooleanVar()
         self._tw_del = tk.BooleanVar()
         self._enabled = tk.BooleanVar(value=True)  # 新任务默认启用，避免被静默存为"禁用"
         self._ow_del_chk = ttk.Checkbutton(frm, text="镜像时删除目标多余文件", variable=self._ow_del)
         self._tw_del_chk = ttk.Checkbutton(frm, text="双向时传播删除", variable=self._tw_del)
         self._sched_on = tk.BooleanVar()
-        self._sched_type = ttk.Combobox(frm, values=[SCHED_INTERVAL, SCHED_DAILY], state="readonly")
-        self._sched_type.set(SCHED_INTERVAL)
+        self._sched_type = ttk.Combobox(frm, values=list(_SCHED_LABELS.values()), state="readonly")
+        self._sched_type.set(_SCHED_LABELS[SCHED_INTERVAL])
         self._interval = ttk.Spinbox(frm, from_=1, to=99999, increment=1, width=10)
         self._interval.set("60")
         self._times = ttk.Entry(frm)
@@ -60,8 +77,8 @@ class TaskDialog(tk.Toplevel):
         self._include = ttk.Entry(frm)
         self._exclude = ttk.Entry(frm)
         self._exclude.insert(0, "*.tmp,__pycache__/,node_modules/,.git/")
-        self._conflict = ttk.Combobox(frm, values=CONFLICT_POLICIES, state="readonly")
-        self._conflict.set(CONFLICT_NEWER)
+        self._conflict = ttk.Combobox(frm, values=list(_POLICY_LABELS.values()), state="readonly")
+        self._conflict.set(_POLICY_LABELS[CONFLICT_NEWER])
 
         r = 0
         self._row(frm, r, "任务名称", self._name); r += 1
@@ -92,7 +109,7 @@ class TaskDialog(tk.Toplevel):
 
         # 双向时禁用单向删除勾选，反之亦然（UI 友好，不强制）
         def _on_mode(*_):
-            if self._mode.get() == MODE_TWO_WAY:
+            if self._mode.get() == _MODE_LABELS[MODE_TWO_WAY]:
                 self._ow_del_chk.configure(state=tk.DISABLED)
             else:
                 self._ow_del_chk.configure(state=tk.NORMAL)
@@ -108,12 +125,12 @@ class TaskDialog(tk.Toplevel):
         self._name.insert(0, task.name)
         self._src.insert(0, task.source)
         self._dst.insert(0, task.target)
-        self._mode.set(task.mode)
+        self._mode.set(_MODE_LABELS.get(task.mode, task.mode))
         self._ow_del.set(task.one_way_delete)
         self._tw_del.set(task.two_way_delete)
         self._enabled.set(task.enabled)
         self._sched_on.set(task.schedule.enabled)
-        self._sched_type.set(task.schedule.type)
+        self._sched_type.set(_SCHED_LABELS.get(task.schedule.type, task.schedule.type))
         self._interval.delete(0, tk.END)
         self._interval.insert(0, str(task.schedule.interval_minutes))
         self._times.delete(0, tk.END)
@@ -122,7 +139,7 @@ class TaskDialog(tk.Toplevel):
         self._include.insert(0, ",".join(task.include))
         self._exclude.delete(0, tk.END)
         self._exclude.insert(0, ",".join(task.exclude))
-        self._conflict.set(task.conflict_policy)
+        self._conflict.set(_POLICY_LABELS.get(task.conflict_policy, task.conflict_policy))
         if task.mode == MODE_TWO_WAY:
             self._ow_del_chk.configure(state=tk.DISABLED)
 

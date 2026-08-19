@@ -527,6 +527,65 @@ check(ti8.next_run is not None and abs(ti8.next_run - (time.time() + 300)) < 10,
       "补跑触发后 next_run 锚定当前时刻+间隔(而非过期时刻导致立即再触发)")
 sched8.stop()
 
+# ---------- 14. 修复回归: run_now 拒绝禁用任务 ----------
+print("[14] 回归: run_now 禁用拒绝")
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src")
+dst = os.path.join(d, "dst")
+os.makedirs(src)
+os.makedirs(dst)
+store9 = TaskStore(os.path.join(d, "tasks.json"))
+td9 = fresh_task(MODE_ONE_WAY, src, dst)
+td9.enabled = False
+store9.add(td9)
+sched9 = Scheduler(store9, lambda t: None)
+check(not sched9.run_now(td9.id), "run_now 拒绝已禁用任务(返回 False)")
+sched9.stop()
+
+# ---------- 15. 调度器: daily 到点自动触发 + 未到点不触发 ----------
+print("[15] 调度: daily 触发链路")
+import datetime
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src")
+dst = os.path.join(d, "dst")
+os.makedirs(src)
+os.makedirs(dst)
+store10 = TaskStore(os.path.join(d, "tasks.json"))
+td10 = fresh_task(MODE_ONE_WAY, src, dst)
+td10.schedule.enabled = True
+td10.schedule.type = "daily"
+# 未来 2 分钟的时刻：确保本次 poll 不触发，next_run 指向该时刻
+future = (datetime.datetime.now() + datetime.timedelta(minutes=2)).strftime("%H:%M")
+td10.schedule.times = [future]
+store10.add(td10)
+sched10 = Scheduler(store10, lambda t: None)
+sched10._poll_once()
+check(td10.next_run is not None and td10.next_run > time.time(),
+      "daily 未到点: next_run 指向未来时刻")
+sched10.stop()
+
+# ---------- 16. logger: 回调投递 + 超限轮转 ----------
+print("[16] logger: 回调与轮转")
+from logger import AppLogger
+logdir = tempfile.mkdtemp()
+lg = AppLogger(logdir, quiet=True)
+got = []
+lg.add_callback(lambda level, line: got.append((level, line)))
+lg.info("hello-logger")
+check(len(got) == 1 and got[0][0] == "INFO" and "hello-logger" in got[0][1],
+      "logger 回调收到 INFO 日志")
+lg.close()
+# 超限轮转：写入超过阈值的行数后应生成 .1 备份
+lg2 = AppLogger(logdir, quiet=True)
+for i in range(3000):
+    lg2.info("x" * 2000)   # 每行约 2KB，累计 > 2MB 触发轮转
+lg2.close()
+import glob as _glob
+backups = _glob.glob(os.path.join(logdir, "foldersync.log.1"))
+check(len(backups) == 1, "日志超限后轮转生成 .1 备份")
+check(os.path.getsize(os.path.join(logdir, "foldersync.log")) < 2 * 1024 * 1024,
+      "轮转后主日志文件回到阈值以内")
+
 # ---------- 清理 ----------
 print("\n结果：%s" % ("全部通过" if not failures else "%d 项失败" % len(failures)))
 if failures:

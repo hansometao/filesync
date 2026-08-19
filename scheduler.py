@@ -124,9 +124,13 @@ class Scheduler(object):
 
     def run_now(self, task_id):
         # type: (str) -> bool
-        """手动触发一次。已在运行则返回 False。"""
+        """手动触发一次。任务不存在 / 已禁用 / 正在运行则返回 False。"""
         task = self.store.get(task_id)
         if task is None:
+            return False
+        # README 承诺：禁用任务不参与定时，也不手动同步
+        if not task.enabled:
+            self.logger.info("任务[%s] 已禁用，run_now 被拒绝" % task.name)
             return False
         with self._lock:
             if task_id in self._running:

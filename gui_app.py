@@ -115,7 +115,14 @@ class App(object):
         ttk.Button(top, text="打开日志目录", command=self._open_logs).pack(side=tk.LEFT, padx=3, pady=4)
 
         cols = ("name", "mode", "source", "target", "next", "status", "last")
-        self.tree = ttk.Treeview(self.root, columns=cols, show="headings", selectmode="browse")
+        # 任务列表可能很多行：Treeview + 垂直滚动条，保证可滚动查看全部
+        list_frame = ttk.Frame(self.root)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        self.tree = ttk.Treeview(list_frame, columns=cols, show="headings", selectmode="browse")
+        tree_sb = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=tree_sb.set)
+        tree_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree.pack(fill=tk.BOTH, expand=True)
         self.tree.heading("name", text="名称")
         self.tree.heading("mode", text="方向")
         self.tree.heading("source", text="源目录")
@@ -130,7 +137,6 @@ class App(object):
         self.tree.column("next", width=130)
         self.tree.column("status", width=90)
         self.tree.column("last", width=130)
-        self.tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
 
         self._status_label = ttk.Label(self.root, text="调度器：已停止", foreground="#333")
         self._status_label.pack(anchor=tk.W, padx=8)
