@@ -586,6 +586,62 @@ check(len(backups) == 1, "日志超限后轮转生成 .1 备份")
 check(os.path.getsize(os.path.join(logdir, "foldersync.log")) < 2 * 1024 * 1024,
       "轮转后主日志文件回到阈值以内")
 
+# ---------- 17. 每周调度: 计算 + 触发链路 ----------
+print("[17] 调度: weekly 计算与触发")
+from utils.timeutil import next_weekly_times
+import datetime as _dt
+
+# 确定性计算（基准日 2026-08-19 为周三）
+base_wed = _dt.datetime(2026, 8, 19)
+# 周三 09:00 之后：本周三 10:00 未过 -> 返回当天 10:00
+from_e = _dt.datetime(2026, 8, 19, 9, 0, 0).timestamp()
+nxt = next_weekly_times([3], ["10:00"], from_e)
+check(nxt == _dt.datetime(2026, 8, 19, 10, 0, 0).timestamp(),
+      "weekly 本周未过: 返回当天 10:00")
+# 周三 11:00 之后：本周已过 -> 返回下周三 10:00
+from_e2 = _dt.datetime(2026, 8, 19, 11, 0, 0).timestamp()
+nxt2 = next_weekly_times([3], ["10:00"], from_e2)
+check(nxt2 == _dt.datetime(2026, 8, 26, 10, 0, 0).timestamp(),
+      "weekly 本周已过: 返回下周三 10:00")
+# 多周几 × 多时刻：周三五 09:00/18:00，周三 08:00 -> 当天 09:00 最近
+from_e3 = _dt.datetime(2026, 8, 19, 8, 0, 0).timestamp()
+nxt3 = next_weekly_times([3, 5], ["09:00", "18:00"], from_e3)
+check(nxt3 == _dt.datetime(2026, 8, 19, 9, 0, 0).timestamp(),
+      "weekly 多周几多时刻: 取最近组合")
+# 非法输入容错
+check(next_weekly_times([], ["10:00"], time.time()) is None, "weekly 空周几 -> None")
+check(next_weekly_times([0, 8], ["10:00"], time.time()) is None, "weekly 非法周几 -> None")
+check(next_weekly_times([3], ["8点"], time.time()) is None, "weekly 非法时刻 -> None")
+
+# 触发链路：未来 2 分钟不触发 + 到点触发
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src")
+dst = os.path.join(d, "dst")
+os.makedirs(src)
+os.makedirs(dst)
+store11 = TaskStore(os.path.join(d, "tasks.json"))
+tw11 = fresh_task(MODE_ONE_WAY, src, dst)
+tw11.schedule.enabled = True
+tw11.schedule.type = "weekly"
+future = (_dt.datetime.now() + _dt.timedelta(minutes=2)).strftime("%H:%M")
+tw11.schedule.times = [future]
+tw11.schedule.weekdays = [1]  # 周一（未来 2 分钟跨日无碍，next_run 仍指向未来）
+store11.add(tw11)
+ran11 = []
+sched11 = Scheduler(store11, lambda t: ran11.append(t.id))
+sched11._poll_once()
+check(tw11.next_run is not None and tw11.next_run > time.time(),
+      "weekly 未到点: next_run 指向未来时刻")
+check(tw11.id not in ran11, "weekly 未到点: 不触发")
+# 模拟到点：把 next_run 置为过去，poll 应启动 worker
+tw11.next_run = time.time() - 1
+sched11._poll_once()
+deadline = time.time() + 5
+while time.time() < deadline and tw11.id not in ran11:
+    time.sleep(0.05)
+check(tw11.id in ran11, "weekly 到点: 自动触发")
+sched11.stop()
+
 # ---------- 清理 ----------
 print("\n结果：%s" % ("全部通过" if not failures else "%d 项失败" % len(failures)))
 if failures:

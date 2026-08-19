@@ -7,7 +7,7 @@ from tkinter import ttk, filedialog, messagebox
 
 from config import (
     Task, MODE_ONE_WAY, MODE_TWO_WAY,
-    SCHED_INTERVAL, SCHED_DAILY,
+    SCHED_INTERVAL, SCHED_DAILY, SCHED_WEEKLY,
     CONFLICT_POLICIES, CONFLICT_NEWER, CONFLICT_SOURCE,
     CONFLICT_TARGET, CONFLICT_SKIP, CONFLICT_ASK,
 )
@@ -15,7 +15,7 @@ from config import (
 # 下拉框显示中文标签，保存/加载时与内部值双向映射
 # （标签文案与 gui_diff 的 _POLICY_LABELS 保持一致）
 _MODE_LABELS = {MODE_ONE_WAY: "单向镜像", MODE_TWO_WAY: "双向同步"}
-_SCHED_LABELS = {SCHED_INTERVAL: "间隔定时", SCHED_DAILY: "每日时刻"}
+_SCHED_LABELS = {SCHED_INTERVAL: "间隔定时", SCHED_DAILY: "每日时刻", SCHED_WEEKLY: "每周时刻"}
 _POLICY_LABELS = {
     CONFLICT_NEWER: "新版本胜出",
     CONFLICT_SOURCE: "源侧胜出",
@@ -74,6 +74,8 @@ class TaskDialog(tk.Toplevel):
         self._interval.set("60")
         self._times = ttk.Entry(frm)
         self._times.insert(0, "08:00,20:00")
+        self._weekdays = ttk.Entry(frm)
+        self._weekdays.insert(0, "1,3,5")  # 周一、三、五（1=周一 … 7=周日）
         self._include = ttk.Entry(frm)
         self._exclude = ttk.Entry(frm)
         self._exclude.insert(0, "*.tmp,__pycache__/,node_modules/,.git/")
@@ -94,6 +96,7 @@ class TaskDialog(tk.Toplevel):
         self._row(frm, r, "定时类型", self._sched_type); r += 1
         self._row(frm, r, "间隔(分钟)", self._interval); r += 1
         self._row(frm, r, "每日时刻", self._times); r += 1
+        self._row(frm, r, "每周(1-7)", self._weekdays); r += 1
 
         self._row(frm, r, "包含规则", self._include); r += 1
         self._row(frm, r, "排除规则", self._exclude); r += 1
@@ -135,6 +138,8 @@ class TaskDialog(tk.Toplevel):
         self._interval.insert(0, str(task.schedule.interval_minutes))
         self._times.delete(0, tk.END)
         self._times.insert(0, ",".join(task.schedule.times))
+        self._weekdays.delete(0, tk.END)
+        self._weekdays.insert(0, ",".join(str(w) for w in task.schedule.weekdays))
         self._include.delete(0, tk.END)
         self._include.insert(0, ",".join(task.include))
         self._exclude.delete(0, tk.END)
@@ -197,8 +202,24 @@ class TaskDialog(tk.Toplevel):
                 messagebox.showerror(
                     "错误", "每日时刻格式应为 HH:MM（00:00-23:59），非法值：%s" % ",".join(bad))
                 return
-        if self._sched_on.get() and self._sched_type.get() == SCHED_DAILY and not times:
-            messagebox.showerror("错误", "启用每日定时时请至少填写一个时刻，如 08:00,20:00")
+        # P2 修复：daily 与 weekly 都依赖 times（周定时 = 周几×时刻组合），
+        # 启用时缺时刻会静默失效（next_*_times 返回 None），必须拦截
+        if self._sched_on.get() and self._sched_type.get() in (SCHED_DAILY, SCHED_WEEKLY) and not times:
+            messagebox.showerror("错误", "启用每日/每周定时时请至少填写一个时刻，如 08:00,20:00")
+            return
+
+        # 每周定时：周几必须为 1-7（1=周一 … 7=周日），逗号分隔
+        weekdays_raw = [w.strip() for w in self._weekdays.get().split(",") if w.strip()]
+        weekdays = []
+        if weekdays_raw:
+            for w in weekdays_raw:
+                if not re.match(r"^[1-7]$", w):
+                    messagebox.showerror(
+                        "错误", "每周(1-7)应为 1-7 的数字（1=周一…7=周日），非法值：%s" % w)
+                    return
+            weekdays = [int(w) for w in weekdays_raw]
+        if self._sched_on.get() and self._sched_type.get() == SCHED_WEEKLY and not weekdays:
+            messagebox.showerror("错误", "启用每周定时时请至少填写一个周几，如 1,3,5（1=周一）")
             return
 
         if self.is_new:
@@ -216,6 +237,7 @@ class TaskDialog(tk.Toplevel):
         t.schedule.type = self._sched_type.get()
         t.schedule.interval_minutes = interval
         t.schedule.times = times
+        t.schedule.weekdays = weekdays
         t.include = include
         t.exclude = exclude
         t.conflict_policy = self._conflict.get()

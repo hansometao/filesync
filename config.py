@@ -34,14 +34,16 @@ CONFLICT_POLICIES = [
 
 SCHED_INTERVAL = "interval"
 SCHED_DAILY = "daily"
+SCHED_WEEKLY = "weekly"
 
 
 @dataclass
 class Schedule(object):
     enabled: bool = False
-    type: str = SCHED_INTERVAL          # interval | daily
+    type: str = SCHED_INTERVAL          # interval | daily | weekly
     interval_minutes: int = 60
     times: List[str] = field(default_factory=list)  # ["08:00", "20:00"]
+    weekdays: List[int] = field(default_factory=list)  # weekly: [1..7] 1=周一
 
     def to_dict(self):
         # type: () -> Dict[str, Any]
@@ -50,6 +52,7 @@ class Schedule(object):
             "type": self.type,
             "interval_minutes": self.interval_minutes,
             "times": list(self.times),
+            "weekdays": list(self.weekdays),
         }
 
     @classmethod
@@ -61,6 +64,7 @@ class Schedule(object):
             type=d.get("type", SCHED_INTERVAL),
             interval_minutes=int(d.get("interval_minutes", 60)),
             times=list(d.get("times", []) or []),
+            weekdays=list(d.get("weekdays", []) or []),
         )
 
 

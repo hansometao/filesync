@@ -12,8 +12,8 @@ import time
 import threading
 from typing import Any, Callable, List, Optional
 
-from config import Task, SCHED_INTERVAL, SCHED_DAILY
-from utils.timeutil import now_epoch, next_daily_times
+from config import Task, SCHED_INTERVAL, SCHED_DAILY, SCHED_WEEKLY
+from utils.timeutil import now_epoch, next_daily_times, next_weekly_times
 from logger import get_logger
 
 
@@ -120,6 +120,8 @@ class Scheduler(object):
             return nxt
         if sched.type == SCHED_DAILY:
             return next_daily_times(sched.times, from_epoch)
+        if sched.type == SCHED_WEEKLY:
+            return next_weekly_times(sched.weekdays, sched.times, from_epoch)
         return None
 
     def run_now(self, task_id):

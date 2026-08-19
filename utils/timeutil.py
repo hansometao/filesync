@@ -64,6 +64,43 @@ def next_daily_times(times, from_epoch):
     return min(nexts)
 
 
+def next_weekly_times(weekdays, times, from_epoch):
+    """计算每周定时（weekdays 为 [1..7]，1=周一…7=周日）的下一次触发 epoch。
+
+    在选中的每个星期几 × 每个时刻组合中，取 >= from_epoch 的最近触发点；
+    本周组合全部已过则取下周最早组合；weekdays/times 空或全部非法返回 None。
+    """
+    if not weekdays or not times:
+        return None
+    wds = sorted(int(w) for w in weekdays if 1 <= int(w) <= 7)
+    if not wds:
+        return None
+    secs = [_hms(t) for t in times]
+    secs = sorted(s for s in secs if s is not None)
+    if not secs:
+        return None
+    struct = time.localtime(from_epoch)
+    # 本周一 00:00（tm_wday: 0=周一…6=周日）
+    monday = time.mktime(
+        (struct.tm_year, struct.tm_mon, struct.tm_mday, 0, 0, 0, 0, 0, -1)
+    ) - struct.tm_wday * 86400
+    candidates = []
+    for wd in wds:
+        dow = wd - 1  # 配置 1..7 -> 内部 0..6
+        # 绝对基准：本周该周几的 00:00（周一周一 00:00 + dow 天）
+        day0 = monday + dow * 86400
+        for s in secs:
+            cand = day0 + s
+            # 本周该组合已过（含 from_epoch 本身早于该时刻的情况）-> 顺延到下周
+            while cand < from_epoch:
+                cand += 7 * 86400
+            candidates.append(cand)
+    if not candidates:
+        # 理论不可达（wds/secs 非空必有未来组合），防御性兜底
+        return None
+    return min(candidates)
+
+
 def _hms(t):
     try:
         hh, mm = t.split(":")
