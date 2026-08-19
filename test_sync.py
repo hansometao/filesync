@@ -28,6 +28,7 @@ failures = []
 
 
 def check(cond, msg):
+    # type: (bool, str) -> None
     if cond:
         print("  OK  - %s" % msg)
     else:
@@ -36,6 +37,7 @@ def check(cond, msg):
 
 
 def write(path, content, mtime=None):
+    # type: (str, str, Optional[float]) -> None
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
     if mtime is not None:
@@ -43,6 +45,7 @@ def write(path, content, mtime=None):
 
 
 def fresh_task(mode, src, dst, **kw):
+    # type: (str, str, str, **Any) -> Task
     t = Task()
     t.name = "test"
     t.source = src
@@ -144,6 +147,7 @@ ran = []
 
 
 def _sched_run(task):
+    # type: (Task) -> None
     try:
         perform_sync(task)
     finally:
@@ -224,6 +228,7 @@ started_evt = threading.Event()
 finish_evt = threading.Event()
 
 def blocking_run(task):
+    # type: (Task) -> None
     started_evt.set()
     finish_evt.wait(timeout=10)   # 兜底超时，断言失败也不会卡死测试
 
@@ -264,6 +269,7 @@ store4.add(fresh_task(MODE_ONE_WAY, "/tmp/a1", "/tmp/b1"))
 
 
 def _saver():
+    # type: () -> None
     for _ in range(50):
         store4.save()
 
@@ -378,7 +384,7 @@ import contextlib
 
 
 def _cli(argv, app_dir):
-    # type: (list, str) -> object
+    # type: (list, str) -> Tuple[int, str]
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         rc = run_cli(list(argv), app_dir=app_dir)
@@ -431,6 +437,7 @@ _orig = _sync_engine.perform_sync
 
 
 def _boom(task):
+    # type: (Task) -> None
     raise RuntimeError("模拟同步异常")
 
 
@@ -641,6 +648,64 @@ while time.time() < deadline and tw11.id not in ran11:
     time.sleep(0.05)
 check(tw11.id in ran11, "weekly 到点: 自动触发")
 sched11.stop()
+
+# ---------- 18. config: baseline 迁移 + 损坏配置恢复 ----------
+print("[18] config: baseline 迁移与损坏恢复")
+d18 = tempfile.mkdtemp()
+cfg18 = os.path.join(d18, "tasks.json")
+t18 = Task()
+t18.name = "迁移任务"
+# 旧内嵌格式：tasks.json 中直接内嵌 baseline 字段
+legacy18 = t18.to_dict()
+legacy18["baseline"] = {"a.txt": {"size": 3, "mtime": 123.0, "hash": "abc"}}
+with open(cfg18, "w", encoding="utf-8") as f:
+    json.dump({"tasks": [legacy18]}, f, ensure_ascii=False)
+store18 = TaskStore(cfg18)
+t18b = store18.get(t18.id)
+check(t18b is not None and t18b.baseline.get("a.txt", {}).get("hash") == "abc",
+      "baseline 迁移: 内嵌 baseline 被加载")
+bp18 = os.path.join(d18, "baseline", t18.id + ".json")
+check(os.path.exists(bp18), "baseline 迁移: 独立 baseline 文件已生成")
+with open(cfg18, "r", encoding="utf-8") as f:
+    data18 = json.load(f)
+check("baseline" not in data18["tasks"][0], "baseline 迁移: tasks.json 已剥离内嵌 baseline")
+store18b = TaskStore(cfg18)
+t18c = store18b.get(t18.id)
+check(t18c is not None and t18c.baseline.get("a.txt", {}).get("hash") == "abc",
+      "baseline 迁移: 重载后从独立文件恢复")
+
+# 损坏配置：备份现场副本 + 从空配置启动
+d18c = tempfile.mkdtemp()
+cfg18c = os.path.join(d18c, "tasks.json")
+with open(cfg18c, "w", encoding="utf-8") as f:
+    f.write("{ 这不是合法JSON ")
+store18c = TaskStore(cfg18c)
+check(store18c.tasks == [], "损坏配置: 从空配置启动")
+corrupts18 = [x for x in os.listdir(d18c) if x.startswith("tasks.json.corrupt-")]
+check(len(corrupts18) == 1, "损坏配置: 生成 .corrupt-* 备份副本")
+
+# ---------- 19. GUI 校验纯函数（无头可测） ----------
+print("[19] GUI 校验: validate_schedule_input")
+from config import validate_schedule_input, SCHED_DAILY, SCHED_WEEKLY, SCHED_INTERVAL
+
+check(validate_schedule_input(True, SCHED_DAILY, "60", "08:00,20:00", "1,3") is None,
+      "校验: 合法 daily 输入通过")
+check(validate_schedule_input(True, SCHED_WEEKLY, "30", "09:00", "1,3,5") is None,
+      "校验: 合法 weekly 输入通过")
+check(validate_schedule_input(True, SCHED_INTERVAL, "0", "", "") is not None,
+      "校验: interval <1 被拦截")
+check(validate_schedule_input(True, SCHED_INTERVAL, "abc", "", "") is not None,
+      "校验: interval 非整数被拦截")
+check(validate_schedule_input(True, SCHED_DAILY, "60", "25:99", "1") is not None,
+      "校验: 非法时刻被拦截")
+check(validate_schedule_input(True, SCHED_DAILY, "60", "", "1") is not None,
+      "校验: daily 启用缺时刻被拦截")
+check(validate_schedule_input(True, SCHED_WEEKLY, "60", "09:00", "") is not None,
+      "校验: weekly 启用缺周几被拦截")
+check(validate_schedule_input(True, SCHED_WEEKLY, "60", "09:00", "0,8") is not None,
+      "校验: 非法周几被拦截")
+check(validate_schedule_input(False, SCHED_DAILY, "60", "", "") is None,
+      "校验: 未启用定时不强制时刻")
 
 # ---------- 清理 ----------
 print("\n结果：%s" % ("全部通过" if not failures else "%d 项失败" % len(failures)))

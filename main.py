@@ -30,12 +30,6 @@ except Exception:
     pass
 
 
-def _app_dir():
-    # 打包后 __file__ 指向临时目录，改用 exe 所在目录（utils.paths.app_dir 已处理 frozen）
-    from utils.paths import app_dir
-    return app_dir()
-
-
 _HELP = """文件夹同步备份工具
 
 用法:
@@ -90,10 +84,11 @@ def run_cli(argv, app_dir=None):
     """
     from config import TaskStore
     from logger import init_logger
-    from sync_engine import perform_sync
+    from sync_engine import perform_sync, finalize_sync
+    from utils.paths import app_dir as _app_dir_fn
 
     if app_dir is None:
-        app_dir = _app_dir()
+        app_dir = _app_dir_fn()
     store = TaskStore(os.path.join(app_dir, "config", "tasks.json"))
 
     if argv[0] == "--list":
@@ -141,13 +136,13 @@ def run_cli(argv, app_dir=None):
         print("同步失败 [%s]: %s" % (task.name, e))
         store.update_runtime(task)
         return 3
-    store.update_runtime(task)
-    store.save_baseline(task)
+    finalize_sync(task, res, store)
     print("%s: %s" % (task.name, task.last_summary))
     return 0 if res.get("fail_count", 0) == 0 else 2
 
 
 def main():
+    # type: () -> None
     argv = sys.argv[1:]
     if argv and argv[0] in ("--list", "--sync", "--help", "-h"):
         popup = _is_windowed_frozen()
