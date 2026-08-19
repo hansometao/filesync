@@ -1,0 +1,11 @@
+# 文件夹同步备份工具 - 依赖说明
+#
+# 本工具仅依赖 Python 3.8+ 标准库与自带的 tkinter，无需安装任何第三方包即可运行。
+# 下面为可选的加速依赖（缺失时自动回退到 hashlib，功能不受影响）：
+xxhash>=2.0.0   # 可选：文件内容哈希加速（比 md5 更快）；Windows 7 上需 CPython 3.8 对应的 wheel
+
+# 安装方式（可选）：
+#   pip install -r requirements.txt
+#
+# 最低运行环境：CPython 3.8.x（Windows 7 官方支持的最高版本）。
+# 不支持 Python 3.9+ 语法/特性，代码已按 3.8 兼容编写。
