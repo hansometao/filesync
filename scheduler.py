@@ -144,6 +144,11 @@ class Scheduler(object):
                                  name="run-%s" % task_id, daemon=True)
             self._active.append(t)   # 先登记再启动，避免线程早于登记结束的竞态
             t.start()
+        # 审查修复：手动触发后重置 next_run，让 _poll_once 基于更新后的 last_run
+        # 重算（interval 锚定 last_run、daily/weekly 重算未来时刻）。
+        # 若不重置，停机错过周期后的手动触发会让 next_run 保持过期值，
+        # 任务一完成即被调度器立即再触发一次（多余同步）。
+        task.next_run = None
         return True
 
     def _worker(self, task_id):

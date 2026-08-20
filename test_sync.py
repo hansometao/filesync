@@ -1037,6 +1037,45 @@ d = _mk_dialog()
 d._on_cancel()
 check(d.result is None and d.destroyed, "取消: result 置 None 且关闭对话框")
 
+# ---------- 26. 审查修复: run_now 重置 next_run（停机错过场景不重复触发） ----------
+print("[26] 调度: run_now 重置 next_run")
+d26 = tempfile.mkdtemp()
+src26 = os.path.join(d26, "src")
+dst26 = os.path.join(d26, "dst")
+os.makedirs(src26)
+os.makedirs(dst26)
+write(os.path.join(src26, "a.txt"), "x")
+store26 = TaskStore(os.path.join(d26, "tasks.json"))
+tk26 = fresh_task(MODE_ONE_WAY, src26, dst26)
+tk26.schedule.enabled = True
+tk26.schedule.type = "interval"
+tk26.schedule.interval_minutes = 60
+store26.add(tk26)
+tk26.next_run = time.time() - 3600  # 模拟停机错过周期：next_run 已过期
+ran26 = []
+
+
+def _sched_run26(task):
+    # type: (Task) -> None
+    ran26.append(task.id)
+
+
+sched26 = Scheduler(store26, _sched_run26)
+ok26 = sched26.run_now(tk26.id)
+check(ok26, "run_now: 手动触发成功")
+# 修复点：run_now 成功后 next_run 必须重置，否则 _poll_once 会因过期值立即再触发
+check(tk26.next_run is None, "run_now: next_run 已重置(防立即重复触发)")
+# 运行期间 _poll_once 不应重复触发（任务在运行槽中）
+sched26._poll_once()
+check(len(ran26) == 1, "run_now: 运行期间 _poll_once 不重复触发")
+# 等待手动线程结束，确认总触发次数仍为 1
+deadline26 = time.time() + 10
+while len(ran26) < 1 and time.time() < deadline26:
+    time.sleep(0.1)
+time.sleep(0.3)  # 给可能的错误重复触发留出窗口
+check(len(ran26) == 1, "run_now: 任务完成后未再次自动触发(总计 1 次)")
+sched26.stop()
+
 # ---------- 清理 ----------
 print("\n结果：%s" % ("全部通过" if not failures else "%d 项失败" % len(failures)))
 if failures:
