@@ -9,24 +9,17 @@ from config import (
     SCHED_INTERVAL, SCHED_DAILY, SCHED_WEEKLY,
     validate_schedule_input,
     CONFLICT_POLICIES, CONFLICT_NEWER, CONFLICT_SOURCE,
-    CONFLICT_TARGET, CONFLICT_SKIP, CONFLICT_ASK,
+    CONFLICT_TARGET, CONFLICT_SKIP, CONFLICT_ASK, POLICY_LABELS,
 )
 from typing import Optional
 
 # 下拉框显示中文标签，保存/加载时与内部值双向映射
-# （标签文案与 gui_diff 的 _POLICY_LABELS 保持一致）
+# （冲突策略标签统一取自 config.POLICY_LABELS，与差异预览对话框共用一份）
 _MODE_LABELS = {MODE_ONE_WAY: "单向镜像", MODE_TWO_WAY: "双向同步"}
 _SCHED_LABELS = {SCHED_INTERVAL: "间隔定时", SCHED_DAILY: "每日时刻", SCHED_WEEKLY: "每周时刻"}
-_POLICY_LABELS = {
-    CONFLICT_NEWER: "新版本胜出",
-    CONFLICT_SOURCE: "源侧胜出",
-    CONFLICT_TARGET: "目标侧胜出",
-    CONFLICT_SKIP: "跳过(不处理)",
-    CONFLICT_ASK: "逐个询问",
-}
 _MODE_REV = {v: k for k, v in _MODE_LABELS.items()}
 _SCHED_REV = {v: k for k, v in _SCHED_LABELS.items()}
-_POLICY_REV = {v: k for k, v in _POLICY_LABELS.items()}
+_POLICY_REV = {v: k for k, v in POLICY_LABELS.items()}
 
 
 class TaskDialog(tk.Toplevel):
@@ -84,8 +77,8 @@ class TaskDialog(tk.Toplevel):
         self._include = ttk.Entry(frm)
         self._exclude = ttk.Entry(frm)
         self._exclude.insert(0, "*.tmp,__pycache__/,node_modules/,.git/")
-        self._conflict = ttk.Combobox(frm, values=list(_POLICY_LABELS.values()), state="readonly")
-        self._conflict.set(_POLICY_LABELS[CONFLICT_NEWER])
+        self._conflict = ttk.Combobox(frm, values=list(POLICY_LABELS.values()), state="readonly")
+        self._conflict.set(POLICY_LABELS[CONFLICT_NEWER])
 
         r = 0
         self._row(frm, r, "任务名称", self._name); r += 1
@@ -115,14 +108,16 @@ class TaskDialog(tk.Toplevel):
         ttk.Button(btn, text="保存", command=self._on_save).pack(side=tk.RIGHT, padx=4)
         ttk.Button(btn, text="取消", command=self._on_cancel).pack(side=tk.RIGHT, padx=4)
 
-        # 双向时禁用单向删除勾选，反之亦然（UI 友好，不强制）
+        # 双向联动：双向时禁用"单向删除目标多余"、启用"传播删除"；单向反之。
+        # 保存逻辑已强制（one_way_delete 仅单向生效、two_way_delete 仅双向生效），
+        # 这里保持一致避免界面误导；新建时也调用一次以初始化勾选状态。
         def _on_mode(*_):
             # type: (*object) -> None
-            if self._mode.get() == _MODE_LABELS[MODE_TWO_WAY]:
-                self._ow_del_chk.configure(state=tk.DISABLED)
-            else:
-                self._ow_del_chk.configure(state=tk.NORMAL)
+            two_way = self._mode.get() == _MODE_LABELS[MODE_TWO_WAY]
+            self._ow_del_chk.configure(state=tk.DISABLED if two_way else tk.NORMAL)
+            self._tw_del_chk.configure(state=tk.NORMAL if two_way else tk.DISABLED)
         self._mode.bind("<<ComboboxSelected>>", _on_mode)
+        _on_mode()
 
     def _pick(self, entry):
         # type: (tk.Entry) -> None
@@ -152,9 +147,12 @@ class TaskDialog(tk.Toplevel):
         self._include.insert(0, ",".join(task.include))
         self._exclude.delete(0, tk.END)
         self._exclude.insert(0, ",".join(task.exclude))
-        self._conflict.set(_POLICY_LABELS.get(task.conflict_policy, task.conflict_policy))
+        self._conflict.set(POLICY_LABELS.get(task.conflict_policy, task.conflict_policy))
         if task.mode == MODE_TWO_WAY:
             self._ow_del_chk.configure(state=tk.DISABLED)
+            self._tw_del_chk.configure(state=tk.NORMAL)
+        else:
+            self._tw_del_chk.configure(state=tk.DISABLED)
 
     def _on_save(self):
         # type: () -> None

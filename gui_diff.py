@@ -11,7 +11,7 @@ from typing import Optional
 
 from config import (
     CONFLICT_NEWER, CONFLICT_SOURCE, CONFLICT_TARGET,
-    CONFLICT_SKIP, CONFLICT_ASK, CONFLICT_POLICIES, Task,
+    CONFLICT_SKIP, CONFLICT_ASK, CONFLICT_POLICIES, Task, POLICY_LABELS,
 )
 from sync_engine import DiffResult
 
@@ -32,14 +32,6 @@ _KIND_LABEL = {
     "type_conflict": "类型冲突",
     "conflict": "冲突",
     "extra": "仅目标多余",
-}
-
-_POLICY_LABELS = {
-    CONFLICT_NEWER: "新版本胜出",
-    CONFLICT_SOURCE: "源侧胜出",
-    CONFLICT_TARGET: "目标侧胜出",
-    CONFLICT_SKIP: "跳过(不处理)",
-    CONFLICT_ASK: "逐个询问",
 }
 
 
@@ -113,10 +105,10 @@ class DiffDialog(tk.Toplevel):
             for p in CONFLICT_POLICIES:
                 if p == CONFLICT_ASK:
                     continue
-                ttk.Radiobutton(pf, text=_POLICY_LABELS.get(p, p), variable=self._policy_var, value=p).pack(anchor=tk.W)
+                ttk.Radiobutton(pf, text=POLICY_LABELS.get(p, p), variable=self._policy_var, value=p).pack(anchor=tk.W)
         elif self.diff.conflict_count > 0:
             ttk.Label(frm, text="冲突将按任务策略处理：%s（落败方会先备份为 .conflict-时间戳 副本）" %
-                      _POLICY_LABELS.get(self.task.conflict_policy, self.task.conflict_policy),
+                      POLICY_LABELS.get(self.task.conflict_policy, self.task.conflict_policy),
                       foreground="#b00").pack(anchor=tk.W, pady=6)
 
         btn = ttk.Frame(frm)

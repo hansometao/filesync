@@ -121,3 +121,9 @@ def _hms(t):
         return int(hh) * 3600 + int(mm) * 60
     except ValueError:
         return None
+
+
+def unique_stamp():
+    # type: () -> str
+    """唯一时间戳（秒 + 毫秒三位），用于冲突备份 / 损坏配置副本命名防覆盖。"""
+    return time.strftime("%Y%m%d-%H%M%S") + (".%03d" % int((time.time() % 1) * 1000))

@@ -8,7 +8,6 @@
 
 import os
 import json
-import time
 import re
 import shutil
 import threading
@@ -16,6 +15,8 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from dataclasses import dataclass, field, asdict
+
+from utils.timeutil import unique_stamp
 
 MODE_ONE_WAY = "one_way"
 MODE_TWO_WAY = "two_way"
@@ -32,6 +33,16 @@ CONFLICT_POLICIES = [
     CONFLICT_SKIP,
     CONFLICT_ASK,
 ]
+
+# 冲突策略中文标签：GUI 两个对话框（新增/编辑、差异预览）共用一份，
+# 避免重复定义导致新增策略时漏改一处的漂移
+POLICY_LABELS = {
+    CONFLICT_NEWER: "新版本胜出",
+    CONFLICT_SOURCE: "源侧胜出",
+    CONFLICT_TARGET: "目标侧胜出",
+    CONFLICT_SKIP: "跳过(不处理)",
+    CONFLICT_ASK: "逐个询问",
+}
 
 SCHED_INTERVAL = "interval"
 SCHED_DAILY = "daily"
@@ -220,7 +231,7 @@ class TaskStore(object):
         # type: () -> None
         """损坏的配置先保留现场副本，避免后续保存把唯一可修复的原文件覆盖掉。"""
         try:
-            ts = time.strftime("%Y%m%d-%H%M%S") + (".%03d" % int((time.time() % 1) * 1000))
+            ts = unique_stamp()
             dst = "%s.corrupt-%s" % (self.path, ts)
             shutil.copy2(self.path, dst)
             _safe_print("检测到损坏的配置文件，已备份为 %s" % dst)

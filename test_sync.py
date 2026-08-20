@@ -928,7 +928,7 @@ _sys.modules["tkinter.filedialog"] = _fake_fd
 _sys.modules["tkinter.messagebox"] = _fake_mb
 
 from gui_task_dialog import TaskDialog as _TD
-from gui_task_dialog import _MODE_LABELS as _ML, _SCHED_LABELS as _SL, _POLICY_LABELS as _PL
+from gui_task_dialog import _MODE_LABELS as _ML, _SCHED_LABELS as _SL, POLICY_LABELS as _PL
 from config import SCHED_INTERVAL as _SI, SCHED_DAILY as _SD, CONFLICT_NEWER as _CN
 
 d25 = tempfile.mkdtemp()

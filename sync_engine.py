@@ -23,12 +23,11 @@
 
 
 import os
-import time
 import shutil
 from typing import Any, Dict, List, Optional, Tuple
 
 from utils.paths import longpath, join_rel, ensure_dir
-from utils.timeutil import is_newer, now_epoch
+from utils.timeutil import is_newer, now_epoch, unique_stamp
 from scanner import scan, hash_file, FileMeta, ScanCancelled
 from config import Task, MODE_ONE_WAY, MODE_TWO_WAY, CONFLICT_NEWER, CONFLICT_ASK
 from logger import get_logger
@@ -317,7 +316,7 @@ def _resolve_conflict(action, policy, on_ask=None):
         else:
             winner, loser = a_path, b_path  # mtime 平局取源侧
     # 备份落败方（与原文件同目录）。毫秒级时间戳 + 序号，避免同秒多个冲突互相覆盖
-    ts = time.strftime("%Y%m%d-%H%M%S") + (".%03d" % int((time.time() % 1) * 1000))
+    ts = unique_stamp()
     backup = loser + ".conflict-" + ts
     seq = 1
     while os.path.exists(longpath(backup)):
