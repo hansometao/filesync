@@ -57,12 +57,15 @@ def validate_schedule_input(sched_enabled, sched_type, interval_text, times_text
     把校验逻辑从 tkinter 层抽离以便无界面测试。只做校验不做解析，
     调用方在通过后按既有逻辑解析（格式已保证合法）。
     """
-    try:
-        interval = int(interval_text)
-    except ValueError:
-        return "间隔(分钟)必须是整数，当前值：%s" % interval_text
-    if interval < 1:
-        return "间隔(分钟)必须是正整数（>=1）"
+    # 间隔仅 interval 类型使用：daily/weekly 下间隔栏可为空/任意值，
+    # 不应因无关字段拦截保存（解析侧对非 interval 类型有兜底）
+    if sched_enabled and sched_type == SCHED_INTERVAL:
+        try:
+            interval = int(interval_text)
+        except ValueError:
+            return "间隔(分钟)必须是整数，当前值：%s" % interval_text
+        if interval < 1:
+            return "间隔(分钟)必须是正整数（>=1）"
     times = [t.strip() for t in times_text.split(",") if t.strip()]
     for t in times:
         if not re.match(r"^([01]?\d|2[0-3]):[0-5]\d$", t):

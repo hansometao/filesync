@@ -10,8 +10,7 @@ from tkinter import ttk
 from typing import Optional
 
 from config import (
-    CONFLICT_NEWER, CONFLICT_SOURCE, CONFLICT_TARGET,
-    CONFLICT_SKIP, CONFLICT_ASK, CONFLICT_POLICIES, Task, POLICY_LABELS,
+    CONFLICT_NEWER, CONFLICT_ASK, CONFLICT_POLICIES, Task, POLICY_LABELS,
 )
 from sync_engine import DiffResult
 
@@ -54,8 +53,9 @@ class DiffDialog(tk.Toplevel):
         frm = ttk.Frame(self, padding=8)
         frm.pack(fill=tk.BOTH, expand=True)
 
-        info = "待执行动作：%s" % self.diff.summary()
-        ttk.Label(frm, text=info, foreground="#b00" if self.diff.conflict_count else "#333").pack(anchor=tk.W, pady=(0, 6))
+        info = "待执行动作（共 %d 项）：%s" % (len(self.diff.actions), self.diff.summary())
+        has_conflict = bool(self.diff.conflict_count or self.diff.type_conflict_count)
+        ttk.Label(frm, text=info, foreground="#b00" if has_conflict else "#333").pack(anchor=tk.W, pady=(0, 6))
 
         cols = ("tag", "kind", "rel", "detail")
         # 差异列表可能上千条：Treeview + 垂直滚动条，保证可滚动查看全部

@@ -38,6 +38,15 @@ def is_newer(ma, mb):
     return float(ma) > float(mb) + MTIME_TOLERANCE
 
 
+def _midnight(epoch):
+    # type: (float) -> float
+    """epoch 所在当天的 00:00（本地时间）对应的 epoch。"""
+    struct = time.localtime(epoch)
+    return time.mktime(
+        (struct.tm_year, struct.tm_mon, struct.tm_mday, 0, 0, 0, 0, 0, -1)
+    )
+
+
 def next_daily_times(times, from_epoch):
     # type: (List[str], float) -> Optional[float]
     """计算每日定时（times 为 ['HH:MM', ...]）的下一次触发 epoch。
@@ -47,10 +56,7 @@ def next_daily_times(times, from_epoch):
     """
     if not times:
         return None
-    struct = time.localtime(from_epoch)
-    today = time.mktime(
-        (struct.tm_year, struct.tm_mon, struct.tm_mday, 0, 0, 0, 0, 0, -1)
-    )
+    today = _midnight(from_epoch)
     candidates = []
     for t in times:
         sec = _hms(t)
@@ -70,6 +76,30 @@ def next_daily_times(times, from_epoch):
     if not nexts:
         return None
     return min(nexts)
+
+
+def prev_daily_time(times, before_epoch):
+    # type: (List[str], float) -> Optional[float]
+    """<= before_epoch 的最近一个每日触发点（今天已过的或昨天的）。
+
+    用于调度器判断"停机期间是否错过了计划时刻"（补跑判定）；
+    times 为空或全部非法返回 None。DST 切换日按 86400 平移可能有 1 小时偏差，
+    仅影响补跑判定的边界，不影响正常触发。
+    """
+    if not times:
+        return None
+    best = None  # type: Optional[float]
+    today = _midnight(before_epoch)
+    for day_offset in (0, 1):  # 今天与昨天：覆盖"今天还没到第一个时刻"的情况
+        day0 = today - day_offset * 86400
+        for t in times:
+            sec = _hms(t)
+            if sec is None:
+                continue
+            cand = day0 + sec
+            if cand <= before_epoch and (best is None or cand > best):
+                best = cand
+    return best
 
 
 def next_weekly_times(weekdays, times, from_epoch):
@@ -112,6 +142,33 @@ def next_weekly_times(weekdays, times, from_epoch):
         # 理论不可达（wds/secs 非空必有未来组合），防御性兜底
         return None
     return min(candidates)
+
+
+def prev_weekly_time(weekdays, times, before_epoch):
+    # type: (List[int], List[str], float) -> Optional[float]
+    """<= before_epoch 的最近一个每周触发点（今天与过去 7 天内扫描）。
+
+    与 prev_daily_time 同理，用于 weekly 计划的停机补跑判定；
+    weekdays/times 为空或全部非法返回 None。
+    """
+    if not weekdays or not times:
+        return None
+    wds = set(int(w) for w in weekdays if 1 <= int(w) <= 7)
+    secs = [s for s in (_hms(t) for t in times) if s is not None]
+    if not wds or not secs:
+        return None
+    best = None  # type: Optional[float]
+    m0 = _midnight(before_epoch)
+    for day_offset in range(8):  # 今天 + 过去 7 天必覆盖最近一个选中周几
+        day0 = m0 - day_offset * 86400
+        st = time.localtime(day0)
+        if (st.tm_wday + 1) not in wds:  # tm_wday: 0=周一…6=周日 -> 1..7
+            continue
+        for s in secs:
+            cand = day0 + s
+            if cand <= before_epoch and (best is None or cand > best):
+                best = cand
+    return best
 
 
 def _hms(t):

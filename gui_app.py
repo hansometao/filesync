@@ -214,6 +214,8 @@ class App(object):
                 self.store.update(dlg.result)
                 dlg.result.next_run = None  # 重置，让调度器按新配置重算下次触发
                 self._refresh_tasks(full=True)
+                # 与新增任务一致：编辑后若存在启用的定时任务则自动拉起调度器
+                self._maybe_autostart()
         finally:
             self.scheduler.release(task.id)
 
@@ -293,6 +295,12 @@ class App(object):
         # 任何异常都必须释放运行槽，否则任务永久显示"运行中"，编辑/删除/同步全被拒。
         try:
             self._hide_wait()
+            if res["diff"].is_empty():
+                # 无差异：无需确认，直接收尾（所见即所得——0 个动作无可执行）
+                self.scheduler.release(task.id)
+                self._refresh_tasks(full=False)
+                messagebox.showinfo("提示", "无需同步（无差异）")
+                return
             from gui_diff import DiffDialog
             dlg = DiffDialog(self.root, res["diff"], task)
             self.root.wait_window(dlg)

@@ -58,6 +58,9 @@ class DiffResult(object):
         self.delete_count = 0
         self.conflict_count = 0
         self.extra_count = 0
+        self.mkdir_count = 0
+        self.rmdir_count = 0
+        self.type_conflict_count = 0
 
     def add(self, action):
         # type: (Action) -> None
@@ -70,6 +73,12 @@ class DiffResult(object):
             self.conflict_count += 1
         elif action.kind == "extra":
             self.extra_count += 1
+        elif action.kind == "mkdir":
+            self.mkdir_count += 1
+        elif action.kind == "rmdir":
+            self.rmdir_count += 1
+        elif action.kind == "type_conflict":
+            self.type_conflict_count += 1
 
     def is_empty(self):
         # type: () -> bool
@@ -77,12 +86,23 @@ class DiffResult(object):
 
     def summary(self):
         # type: () -> str
-        return "新增/覆盖 %d, 删除 %d, 冲突 %d, 仅目标多余 %d" % (
-            self.copy_count,
-            self.delete_count,
-            self.conflict_count,
-            self.extra_count,
-        )
+        # 只列出非零项：避免空目录同步/类型冲突等场景摘要全是 0 造成漏报
+        parts = []
+        if self.copy_count:
+            parts.append("新增/覆盖 %d" % self.copy_count)
+        if self.delete_count:
+            parts.append("删除 %d" % self.delete_count)
+        if self.mkdir_count:
+            parts.append("创建目录 %d" % self.mkdir_count)
+        if self.rmdir_count:
+            parts.append("删除目录 %d" % self.rmdir_count)
+        if self.conflict_count:
+            parts.append("冲突 %d" % self.conflict_count)
+        if self.type_conflict_count:
+            parts.append("类型冲突 %d" % self.type_conflict_count)
+        if self.extra_count:
+            parts.append("仅目标多余 %d" % self.extra_count)
+        return "，".join(parts) if parts else "无差异"
 
 
 def _content_differs(a, b, a_path, b_path, cancel_event=None):
@@ -289,8 +309,13 @@ def _prune_empty_dirs(path, root):
 
 
 def _resolve_conflict(action, policy, on_ask=None):
-    # type: (Action, str, Optional[Any]) -> str
-    """处理冲突。返回结果描述。备份落败方后再覆盖，确保不丢数据。"""
+    # type: (Action, str, Optional[Any]) -> Tuple[str, bool]
+    """处理冲突。返回 (结果描述, 是否失败)。备份落败方后再覆盖，确保不丢数据。
+
+    - 备份落败方失败时不覆盖（README 承诺"绝不静默丢数据"），计为失败，
+      冲突保持原状，下次同步重试；
+    - 覆盖失败同样计为失败（计入 fail_count，任务状态才不会误报"成功"）。
+    """
     logger = get_logger()
     a_path = action.from_path  # 源侧
     b_path = action.to_path    # 目标侧
@@ -300,7 +325,7 @@ def _resolve_conflict(action, policy, on_ask=None):
         policy = on_ask(action) or CONFLICT_NEWER
     if policy == "skip":
         logger.warn("冲突未处理(跳过): %s" % action.rel)
-        return "跳过冲突"
+        return "跳过冲突", False
     # 选定胜者
     if policy == "source_wins":
         winner, loser = a_path, b_path
@@ -325,16 +350,19 @@ def _resolve_conflict(action, policy, on_ask=None):
     try:
         shutil.copy2(longpath(loser), longpath(backup))
     except OSError as e:
-        logger.warn("冲突备份失败 %s: %s" % (loser, e))
+        # 备份失败则不覆盖：覆盖成功而备份缺失会静默丢落败方数据，
+        # 违背"先备份再覆盖"的承诺；保持冲突原状，下次同步重试
+        logger.error("冲突备份失败，跳过覆盖 %s: %s" % (loser, e))
+        return "冲突处理失败(备份不成,未覆盖)", True
     # 用胜者覆盖落败方
     try:
         _do_copy(winner, loser)
     except OSError as e:
         logger.error("冲突覆盖失败 %s: %s" % (loser, e))
-        return "冲突处理失败"
+        return "冲突处理失败", True
     logger.info("冲突已解决(胜者:%s, 备份:%s): %s" % (
         "源" if winner is a_path else "目标", backup, action.rel))
-    return "冲突已解决"
+    return "冲突已解决", False
 
 
 def _safe_mtime(path):
@@ -388,7 +416,10 @@ def apply_actions(actions, conflict_policy, on_ask=None, cancel_event=None):
                 logs.append("[类型冲突] %s: %s" % (action.rel, action.detail))
                 fail += 1
             elif action.kind == "conflict":
-                logs.append(_resolve_conflict(action, conflict_policy, on_ask))
+                msg, conflict_failed = _resolve_conflict(action, conflict_policy, on_ask)
+                logs.append(msg)
+                if conflict_failed:
+                    fail += 1
             elif action.kind == "extra":
                 logs.append("[保留] %s" % action.rel)
         except ScanCancelled:
@@ -398,6 +429,20 @@ def apply_actions(actions, conflict_policy, on_ask=None, cancel_event=None):
             logs.append("[失败] %s: %s" % (action.rel, e))
             fail += 1
     return logs, fail
+
+
+def _stat_meta(root, rel):
+    # type: (str, str) -> Optional[FileMeta]
+    """取 root 下某相对路径的当前文件状态；不存在/不可访问返回 None。
+
+    dirty 条目在执行阶段刚被改写/删除，直接 stat 即可，无需为少量
+    变更路径对整个目标树做全量重扫。
+    """
+    try:
+        st = os.stat(longpath(join_rel(root, rel)))
+    except OSError:
+        return None
+    return FileMeta(st.st_size, st.st_mtime)
 
 
 def _dst_dirty_rels(actions, src_root, dst_root):
@@ -426,7 +471,7 @@ def build_baseline_after(task, dst_root, self_paths=None, snap=None,
 
     - snap：diff 阶段的目标侧快照（可含缓存哈希），避免全量重扫重读。
     - dirty_rels：本次在目标侧新增/覆盖/删除的相对路径；快照对这些条目已过期，
-      仅对它们重新扫描取真实状态（含删除后消失的条目）。
+      仅对它们直接 stat 取真实状态（含删除后消失的条目），不做全量重扫。
     - old_baseline：旧 baseline；size/mtime 与快照一致的条目直接沿用其哈希
       （内容不可能变化），把全量哈希降为"仅变更文件"。
     - 目录条目（is_dir=True）不写入 baseline：目录只做创建/合并，不做内容比对，
@@ -435,20 +480,19 @@ def build_baseline_after(task, dst_root, self_paths=None, snap=None,
     """
     dirty = set(dirty_rels or set())
     fresh = {}  # type: Dict[str, FileMeta]
-    if snap is not None:
+    if snap is None:
+        # 无快照可用（如直接调用 apply_diff 的旧路径）：全量扫一次目标侧
+        fresh = scan(dst_root, include=task.include, exclude=task.exclude,
+                     self_paths=self_paths, with_hash=False,
+                     cancel_event=cancel_event)
+    else:
         for rel, meta in snap.items():
             if rel not in dirty:
                 fresh[rel] = meta
-    if snap is None or dirty:
-        rescanned = scan(dst_root, include=task.include, exclude=task.exclude,
-                         self_paths=self_paths, with_hash=False,
-                         cancel_event=cancel_event)
-        if snap is None:
-            fresh = rescanned
-        else:
-            for rel in dirty:
-                if rel in rescanned:
-                    fresh[rel] = rescanned[rel]
+        for rel in dirty:
+            m = _stat_meta(dst_root, rel)
+            if m is not None:
+                fresh[rel] = m
     old_baseline = old_baseline or {}
     base = {}  # type: Dict[str, Dict[str, Any]]
     for rel, meta in fresh.items():
@@ -471,8 +515,8 @@ def build_baseline_after(task, dst_root, self_paths=None, snap=None,
 
 def apply_diff(task, diff_result, conflict_policy=None, self_paths=None,
                logger=None, on_ask=None, cancel_event=None,
-               src_snap=None, dst_snap=None):
-    # type: (Any, Any, Optional[str], Optional[Any], Any, Optional[Any], Optional[object], Optional[Dict[str, FileMeta]], Optional[Dict[str, FileMeta]]) -> Dict[str, Any]
+               dst_snap=None):
+    # type: (Any, Any, Optional[str], Optional[Any], Any, Optional[Any], Optional[object], Optional[Dict[str, FileMeta]]) -> Dict[str, Any]
     """执行既有的 DiffResult（所见即所得：执行的就是预览确认过的动作集合）。
 
     内部完成动作执行、失败统计、baseline 重建与任务状态更新。
@@ -545,7 +589,7 @@ def perform_sync(task, logger=None, conflict_override=None, dry_run=False,
                 "src_snap": src_snap, "dst_snap": dst_snap, "fail_count": 0}
     res = apply_diff(task, result, conflict_policy=conflict_override,
                      self_paths=self_paths, logger=logger, on_ask=on_ask,
-                     cancel_event=cancel_event, src_snap=src_snap, dst_snap=dst_snap)
+                     cancel_event=cancel_event, dst_snap=dst_snap)
     res["src_snap"] = src_snap
     res["dst_snap"] = dst_snap
     return res

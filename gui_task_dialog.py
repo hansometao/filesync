@@ -8,8 +8,7 @@ from config import (
     Task, MODE_ONE_WAY, MODE_TWO_WAY,
     SCHED_INTERVAL, SCHED_DAILY, SCHED_WEEKLY,
     validate_schedule_input,
-    CONFLICT_POLICIES, CONFLICT_NEWER, CONFLICT_SOURCE,
-    CONFLICT_TARGET, CONFLICT_SKIP, CONFLICT_ASK, POLICY_LABELS,
+    CONFLICT_NEWER, POLICY_LABELS,
 )
 from typing import Optional
 
@@ -195,8 +194,17 @@ class TaskDialog(tk.Toplevel):
             messagebox.showerror("错误", err)
             return
 
-        # 校验已保证格式合法，按既有逻辑解析（times/weekdays 为空时得到空列表）
-        interval = int(self._interval.get())
+        # 校验已保证格式合法，按既有逻辑解析（times/weekdays 为空时得到空列表）。
+        # 间隔栏仅 interval 类型被校验为整数；其他类型可为空/非法，
+        # 沿用原任务值（新建默认 60），保证 Schedule.interval_minutes 始终有效
+        try:
+            interval = int(self._interval.get())
+        except ValueError:
+            if self.is_new:
+                interval = 60
+            else:
+                assert self.task is not None
+                interval = self.task.schedule.interval_minutes
         times = [t.strip() for t in self._times.get().split(",") if t.strip()]
         include = [t.strip() for t in self._include.get().split(",") if t.strip()]
         exclude = [t.strip() for t in self._exclude.get().split(",") if t.strip()]

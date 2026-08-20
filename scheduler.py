@@ -13,7 +13,10 @@ import threading
 from typing import Any, Callable, List, Optional
 
 from config import Task, SCHED_INTERVAL, SCHED_DAILY, SCHED_WEEKLY
-from utils.timeutil import now_epoch, next_daily_times, next_weekly_times
+from utils.timeutil import (
+    now_epoch, next_daily_times, next_weekly_times,
+    prev_daily_time, prev_weekly_time,
+)
 from logger import get_logger
 
 
@@ -180,6 +183,26 @@ class Scheduler(object):
                 except Exception:
                     pass
 
+    def _missed_since_last_run(self, task, now):
+        # type: (Task, float) -> bool
+        """daily/weekly 计划在 last_run 之后是否有已错过未执行的时刻。
+
+        interval 不需要此判定：_compute_next 已按 last_run 锚定，
+        过期即视为立即到期（补跑）。+2 秒容差吸收完成时刻与计划时刻的
+        浮点/秒级偏差，避免刚跑完又被判"错过"。
+        """
+        sched = task.schedule
+        if task.last_run is None:
+            # 从未运行过：与 interval 首跑行为一致，等下一个计划点，不补跑
+            return False
+        if sched.type == SCHED_DAILY:
+            prev = prev_daily_time(sched.times, now)
+        elif sched.type == SCHED_WEEKLY:
+            prev = prev_weekly_time(sched.weekdays, sched.times, now)
+        else:
+            return False
+        return prev is not None and prev > task.last_run + 2
+
     def _poll_once(self, now=None):
         # type: (Optional[float]) -> None
         if now is None:
@@ -190,7 +213,15 @@ class Scheduler(object):
                 continue
             # next_run 粘性化：只在未设置时计算，避免每秒重算导致触发点无限滑移
             if task.next_run is None:
-                task.next_run = self._compute_next(task, now)
+                nxt = self._compute_next(task, now)
+                # 停机补跑（仅冷启动分支）：daily/weekly 错过的计划时刻在下次
+                # 启动时补跑一次（README 承诺）。不放 _compute_next —— 触发后的
+                # 重算也会走它，配合运行中顺延会造成每次触发跑两遍。
+                # 任务正在运行时不补（run_now 刚触发过，last_run 尚未更新）
+                if (nxt is not None and task.id not in self._running
+                        and self._missed_since_last_run(task, now)):
+                    nxt = now
+                task.next_run = nxt
             nxt = task.next_run
             if nxt is not None and now >= nxt:
                 started = False

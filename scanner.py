@@ -18,7 +18,7 @@ import os
 import fnmatch
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from utils.paths import longpath, join_rel, is_longpath_supported
+from utils.paths import longpath, is_longpath_supported
 from logger import get_logger
 
 
@@ -150,16 +150,24 @@ def scan(directory, include=None, exclude=None, self_paths=None, with_hash=False
                 # 目录级排除（如 __pycache__/）
                 if _excluded(rel, name, exclude):
                     continue
+                # Windows 目录联接/挂载点等重解析点：is_symlink 抓不到它们，
+                # 环状联接会让递归扫描无限循环；与软链同策略跳过（不跟随）。
+                # follow_symlinks=False 对普通目录取值与 stat() 相同；
+                # Windows 上 scandir 的 stat 来自目录枚举缓存，无额外开销。
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                except OSError as e:
+                    get_logger().warn("无法读取目录信息 %s: %s" % (rel, e))
+                    continue
+                if (os.name == "nt"
+                        and getattr(st, "st_file_attributes", 0) & 0x400):  # FILE_ATTRIBUTE_REPARSE_POINT
+                    get_logger().debug("跳过目录联接/重解析点(防循环): %s" % rel)
+                    continue
                 # include 过滤下不记录目录条目：空目录不含任何匹配文件，
                 # 同步它只会制造"空目录被传播"的噪音；含匹配文件的目录
                 # 由复制时的 ensure_dir 自动创建。无 include 时照常记录
                 # 目录条目（同步空目录 / 清理目标多余目录需要它）。
                 if not include:
-                    try:
-                        st = entry.stat()
-                    except OSError as e:
-                        get_logger().warn("无法读取目录信息 %s: %s" % (rel, e))
-                        continue
                     result[rel] = FileMeta(st.st_size, st.st_mtime, h=None, is_dir=True)
                 recurse(full, rel)
             else:
