@@ -50,9 +50,9 @@ class App(object):
         self.scheduler.set_status_callback(lambda: self._ui_put(self._refresh_tasks))
 
         self._wait = None                  # type: Optional[tk.Toplevel]
-        self._wait_label = None
-        self._wait_prog = None
-        self._wait_bar = None
+        self._wait_label = None            # type: Optional[ttk.Label]
+        self._wait_prog = None             # type: Optional[ttk.Label]
+        self._wait_bar = None              # type: Optional[ttk.Progressbar]
         self._wait_cancellable = False
         self._cancel = threading.Event()   # 手动同步的取消信号
         self._prog_count = 0
@@ -60,7 +60,7 @@ class App(object):
         self._closing = False
         self._tick_id = None               # type: Optional[str]
         self._drain_id = None              # type: Optional[str]
-        self._ui_queue = queue.Queue()     # worker -> UI 的唯一通道
+        self._ui_queue = queue.Queue()     # type: queue.Queue  # worker -> UI 的唯一通道
 
         self._build_ui()
         self.logger.add_callback(self._on_log)
@@ -416,6 +416,7 @@ class App(object):
         if self._wait is not None:
             try:
                 if self._wait.winfo_exists():
+                    assert self._wait_label is not None  # 有等待窗则必有标签
                     self._wait_label.config(text=msg)
                     return
             except tk.TclError:

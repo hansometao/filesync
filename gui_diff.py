@@ -7,11 +7,13 @@
 
 import tkinter as tk
 from tkinter import ttk
+from typing import Optional
 
 from config import (
     CONFLICT_NEWER, CONFLICT_SOURCE, CONFLICT_TARGET,
-    CONFLICT_SKIP, CONFLICT_ASK, CONFLICT_POLICIES,
+    CONFLICT_SKIP, CONFLICT_ASK, CONFLICT_POLICIES, Task,
 )
+from sync_engine import DiffResult
 
 _KIND_TAG = {
     "copy": "[+]",
@@ -43,15 +45,15 @@ _POLICY_LABELS = {
 
 class DiffDialog(tk.Toplevel):
     def __init__(self, parent, diff_result, task):
-        # type: (tk.Widget, object, object) -> None
+        # type: (tk.Misc, DiffResult, Task) -> None
         super(DiffDialog, self).__init__(parent)
         self.title("同步差异预览 - %s" % task.name)
         self.diff = diff_result
         self.task = task
-        self.result_policy = None  # None 表示取消
+        self.result_policy = None  # type: Optional[str]  # None 表示取消
         self._build()
         self.geometry("720x520")
-        self.transient(parent)
+        self.transient(parent)  # type: ignore[call-overload]  # parent 实际为 Tk/Toplevel（均继承 Wm），标注为 Misc 仅为通用
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
 

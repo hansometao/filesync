@@ -16,7 +16,7 @@
 
 import os
 import sys
-from typing import Optional
+from typing import Any, Callable, Optional
 
 # Windows 7 DPI 适配（最佳努力，失败不影响功能）
 try:
@@ -54,7 +54,7 @@ def _is_windowed_frozen():
 
 
 def _cli_output_popup(fn):
-    # type: (object) -> int
+    # type: (Callable[[], Any]) -> int
     """windowed 打包下把 CLI 输出捕获后用弹窗展示，返回 fn 的退出码。
 
     仅 windowed 单文件 exe 走此路径；源码运行 / console 打包仍直接打印到控制台。

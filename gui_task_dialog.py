@@ -11,6 +11,7 @@ from config import (
     CONFLICT_POLICIES, CONFLICT_NEWER, CONFLICT_SOURCE,
     CONFLICT_TARGET, CONFLICT_SKIP, CONFLICT_ASK,
 )
+from typing import Optional
 
 # 下拉框显示中文标签，保存/加载时与内部值双向映射
 # （标签文案与 gui_diff 的 _POLICY_LABELS 保持一致）
@@ -30,24 +31,26 @@ _POLICY_REV = {v: k for k, v in _POLICY_LABELS.items()}
 
 class TaskDialog(tk.Toplevel):
     def __init__(self, parent, task, store):
-        # type: (tk.Widget, object, object) -> None
+        # type: (tk.Misc, Optional[Task], object) -> None
         super(TaskDialog, self).__init__(parent)
         self.store = store
         self.task = task
         self.is_new = task is None
-        self.result = None  # 保存后的 Task 或 None
+        self.result = None  # type: Optional[Task]  # 保存后的 Task 或 None
         self.title("新建同步任务" if self.is_new else "编辑同步任务")
         self._build()
         self.geometry("560x600")
         self.minsize(520, 560)  # M-11：高 DPI（125%/150%）下防止按钮被压缩出界，且允许手动放大
-        self.transient(parent)
+        self.transient(parent)  # type: ignore[call-overload]  # parent 实际为 Tk/Toplevel（均继承 Wm），标注为 Misc 仅为通用
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
         if not self.is_new:
+            # task 非 None（is_new=False 时由调用方传入既有任务）
+            assert task is not None
             self._load(task)
 
     def _row(self, parent, row, label, widget, btn=None):
-        # type: (tk.Widget, int, str, tk.Widget, object) -> None
+        # type: (tk.Misc, int, str, tk.Widget, Optional[tk.Widget]) -> None
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky=tk.W, padx=4, pady=3)
         widget.grid(row=row, column=1, sticky=tk.EW, padx=4, pady=3)
         if btn is not None:
@@ -204,6 +207,8 @@ class TaskDialog(tk.Toplevel):
         if self.is_new:
             t = Task()
         else:
+            # 编辑模式：复用既有 Task 对象（is_new=False 时 task 必非 None）
+            assert self.task is not None
             t = self.task
         t.name = name
         t.source = os.path.abspath(src)

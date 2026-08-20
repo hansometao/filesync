@@ -5,7 +5,7 @@ Windows 7 上 FAT32 文件系统的修改时间精度仅 2 秒，直接比较 mt
 """
 
 import time
-from typing import Optional
+from typing import List, Optional
 
 # FAT32 时间精度（秒）。NTFS 为 100ns，但为兼容可移动磁盘统一取 2。
 MTIME_TOLERANCE = 2.0
@@ -62,7 +62,11 @@ def next_daily_times(times, from_epoch):
             return cand
     # 全部已过，取次日最早；无合法候选返回 None（由调用方按未配置处理）
     tomorrow = today + 86400
-    nexts = [tomorrow + _hms(t) for t in times if _hms(t) is not None]
+    nexts = []
+    for t in times:
+        s = _hms(t)
+        if s is not None:
+            nexts.append(tomorrow + s)
     if not nexts:
         return None
     return min(nexts)
@@ -80,8 +84,12 @@ def next_weekly_times(weekdays, times, from_epoch):
     wds = sorted(int(w) for w in weekdays if 1 <= int(w) <= 7)
     if not wds:
         return None
-    secs = [_hms(t) for t in times]
-    secs = sorted(s for s in secs if s is not None)
+    secs = []
+    for t in times:
+        s = _hms(t)
+        if s is not None:
+            secs.append(s)
+    secs.sort()
     if not secs:
         return None
     struct = time.localtime(from_epoch)

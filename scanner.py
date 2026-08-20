@@ -16,7 +16,7 @@ scan / hash_file 在 worker 线程运行。传入的 `progress` 回调在 worker
 
 import os
 import fnmatch
-from typing import Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from utils.paths import longpath, join_rel, is_longpath_supported
 from logger import get_logger
@@ -38,7 +38,7 @@ class FileMeta(object):
 
 
 def hash_file(path, chunk=1 << 20, cancel_event=None):
-    # type: (str, int, Optional[object]) -> Optional[str]
+    # type: (str, int, Optional[Any]) -> Optional[str]
     """计算文件内容哈希。优先 xxhash，回退 md5。失败返回 None。
 
     cancel_event 为 threading.Event；置位时在两个分块之间抛出 ScanCancelled，
@@ -47,7 +47,7 @@ def hash_file(path, chunk=1 << 20, cancel_event=None):
     lp = longpath(path)
     try:
         try:
-            import xxhash  # type: ignore
+            import xxhash  # mypy: ignore_missing_imports 全局处理，无需逐处 ignore
             h = xxhash.xxh64()
             with open(lp, "rb") as f:
                 for block in iter(lambda: f.read(chunk), b""):
@@ -96,7 +96,7 @@ def _excluded(rel, name, exclude):
 
 def scan(directory, include=None, exclude=None, self_paths=None, with_hash=False, progress=None,
          cancel_event=None):
-    # type: (str, Optional[List[str]], Optional[List[str]], Optional[List[str]], bool, Optional[object], Optional[object]) -> Dict[str, FileMeta]
+    # type: (str, Optional[List[str]], Optional[List[str]], Optional[Set[str]], bool, Optional[Callable[[str], None]], Optional[Any]) -> Dict[str, FileMeta]
     """递归扫描目录，返回 {相对路径: FileMeta}。
 
     - self_paths：要跳过的目录绝对路径集合（工具自身 config/logs）。

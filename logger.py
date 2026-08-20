@@ -10,7 +10,7 @@ import os
 import sys
 import time
 import threading
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Optional
 
 from utils.paths import longpath
 
@@ -29,7 +29,7 @@ class AppLogger(object):
         self._quiet = quiet  # GUI 模式置 True，抑制控制台打印（文件 + 回调照常）
         self._lock = threading.Lock()
         self._callbacks = []  # type: List[Callable[[str, str], None]]
-        self._file = None  # type: Optional[object]
+        self._file = None  # type: Optional[Any]
         self._bytes_written = 0
         ensure_dir_safe(log_dir)
         self._path = os.path.join(log_dir, "foldersync.log")
@@ -104,10 +104,11 @@ class AppLogger(object):
     def _rotate(self):
         # type: () -> None
         """运行期轮转：关闭旧文件、rename .1、重开、清零计数（调用方须持锁）。"""
-        try:
-            self._file.close()
-        except OSError:
-            pass
+        if self._file is not None:
+            try:
+                self._file.close()
+            except OSError:
+                pass
         backup = self._path + ".1"
         try:
             if os.path.exists(backup):

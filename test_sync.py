@@ -1,3 +1,5 @@
+# mypy: ignore-errors
+# 测试脚本不做脚本级类型检查：含大量 fake tkinter 类与动态装配，无类型价值
 """无界面自测：覆盖 diff / apply / 冲突 / 调度器核心逻辑。
 
 运行：python test_sync.py

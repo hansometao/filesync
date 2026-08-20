@@ -53,6 +53,7 @@ class Action(object):
 
 class DiffResult(object):
     def __init__(self):
+        # type: () -> None
         self.actions = []  # type: List[Action]
         self.copy_count = 0
         self.delete_count = 0
@@ -86,7 +87,7 @@ class DiffResult(object):
 
 
 def _content_differs(a, b, a_path, b_path, cancel_event=None):
-    # type: (FileMeta, FileMeta, str, str, Optional[object]) -> bool
+    # type: (FileMeta, FileMeta, str, str, Optional[Any]) -> bool
     """size 不同即判不同；size 相同且 mtime 完全相等视为相同（copy2 保留 mtime）。
 
     size 相同但 mtime 有差异（含 FAT32 2 秒粒度、<2 秒快速编辑的微差）时，
@@ -294,6 +295,8 @@ def _resolve_conflict(action, policy, on_ask=None):
     logger = get_logger()
     a_path = action.from_path  # 源侧
     b_path = action.to_path    # 目标侧
+    # 冲突动作必然携带两侧路径（diff 构造时保证），assert 仅为类型收窄
+    assert a_path is not None and b_path is not None
     if policy == CONFLICT_ASK and on_ask is not None:
         policy = on_ask(action) or CONFLICT_NEWER
     if policy == "skip":
@@ -344,7 +347,7 @@ def _safe_mtime(path):
 
 
 def apply_actions(actions, conflict_policy, on_ask=None, cancel_event=None):
-    # type: (List[Action], str, Optional[Any], Optional[object]) -> Tuple[List[str], int]
+    # type: (List[Action], str, Optional[Any], Optional[Any]) -> Tuple[List[str], int]
     """执行动作列表。返回 (日志行列表, 失败数)；cancel_event 置位时抛 ScanCancelled。
 
     删除动作的 from_path 记录其所属根目录，执行后在该根内清理空目录。
@@ -357,17 +360,23 @@ def apply_actions(actions, conflict_policy, on_ask=None, cancel_event=None):
             raise ScanCancelled()
         try:
             if action.kind == "copy":
+                # copy 动作必有源/目标路径（diff 构造时保证），assert 仅为类型收窄
+                assert action.from_path is not None and action.to_path is not None
                 _do_copy(action.from_path, action.to_path)
                 logs.append("%s %s" % (action.detail, action.rel))
             elif action.kind == "delete":
+                assert action.to_path is not None
                 _do_delete(action.to_path)
                 logs.append("%s %s" % (action.detail, action.rel))
                 if action.from_path:
+                    assert action.to_path is not None
                     _prune_empty_dirs(action.to_path, action.from_path)
             elif action.kind == "mkdir":
+                assert action.to_path is not None
                 ensure_dir(action.to_path)
                 logs.append("%s %s" % (action.detail, action.rel))
             elif action.kind == "rmdir":
+                assert action.to_path is not None
                 # best-effort：目录非空则跳过（非空目录由其子文件删除 + 空目录清理收敛），
                 # 不计入失败，避免误报
                 try:
@@ -454,7 +463,7 @@ def build_baseline_after(task, dst_root, self_paths=None, snap=None,
         h = meta.hash
         if h is None:
             h = hash_file(join_rel(dst_root, rel), cancel_event=cancel_event)
-        entry = {"size": meta.size, "mtime": meta.mtime}
+        entry = {"size": meta.size, "mtime": meta.mtime}  # type: Dict[str, Any]
         if h is not None:
             entry["hash"] = h
         base[rel] = entry
