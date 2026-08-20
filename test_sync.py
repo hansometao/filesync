@@ -716,7 +716,8 @@ from utils import paths as _paths
 check(os.path.isdir(_paths.app_dir()), "app_dir: 返回存在的应用根目录")
 check(_paths.is_longpath_supported() == (sys.platform == "win32"),
       "is_longpath_supported: 仅 Windows 为 True")
-check(_paths.longpath("/tmp/abc") == "/tmp/abc" or "/tmp/abc".startswith("\\\\?\\"),
+_lp20 = _paths.longpath("/tmp/abc")
+check(_lp20 == "/tmp/abc" or _lp20.startswith("\\\\?\\"),
       "longpath: 非 Windows 原样返回(或 Windows 加前缀)")
 check(_paths.longpath(None) is None, "longpath(None) 原样返回 None")
 p20 = os.path.join(tempfile.mkdtemp(), "a", "b", "c")
@@ -737,7 +738,11 @@ check(is_newer(100.0, None), "is_newer: mb=None -> ma 更新")
 check(is_newer(100.0 + MTIME_TOLERANCE + 0.5, 100.0), "is_newer: 超出容差判更新")
 check(not is_newer(100.0 + MTIME_TOLERANCE, 100.0), "is_newer: 恰在容差内不判更新")
 check(_hms("08:30") == 30600, "_hms: 合法时刻换算秒数")
-check(_hms("25:99") == 95940, "_hms: 数值越界不校验(按公式换算)")
+check(_hms("25:99") is None, "_hms: 越界时刻返回 None(越界按非法)")
+check(_hms("-1:00") is None, "_hms: 负数小时返回 None")
+check(_hms("08:60") is None, "_hms: 越界分钟返回 None")
+check(_hms("23:59") == 86340, "_hms: 边界合法时刻(23:59)")
+check(_hms("00:00") == 0, "_hms: 边界合法时刻(00:00)")
 check(_hms("abc") is None, "_hms: 非时刻格式返回 None")
 
 # ---------- 22. scanner: 过滤 / 排除 / 取消 / 哈希 ----------
@@ -1075,6 +1080,479 @@ while len(ran26) < 1 and time.time() < deadline26:
 time.sleep(0.3)  # 给可能的错误重复触发留出窗口
 check(len(ran26) == 1, "run_now: 任务完成后未再次自动触发(总计 1 次)")
 sched26.stop()
+
+# ---------- 27. F1: 冲突处理失败计入 fail_count + 备份失败不覆盖 ----------
+print("[27] F1: 冲突失败计数与备份安全")
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src")
+dst = os.path.join(d, "dst")
+os.makedirs(src)
+os.makedirs(dst)
+write(os.path.join(src, "c.txt"), "src-version", mtime=1000.0)
+write(os.path.join(dst, "c.txt"), "dst-version", mtime=2000.0)
+
+# 备份失败 -> 不覆盖落败方 + 计为失败（不静默丢数据）
+t = fresh_task(MODE_TWO_WAY, src, dst, conflict_policy=CONFLICT_SOURCE)
+_orig_copy2 = _sync_engine.shutil.copy2
+
+
+def _boom_copy2(*a, **k):
+    # type: (*object, **object) -> None
+    raise OSError("模拟备份失败")
+
+
+_sync_engine.shutil.copy2 = _boom_copy2
+try:
+    res = perform_sync(t)
+finally:
+    _sync_engine.shutil.copy2 = _orig_copy2
+check(res.get("fail_count") == 1, "F1: 冲突备份失败计为失败(fail_count=1)")
+check(t.last_status == "部分失败", "F1: 冲突失败不误报'成功'")
+with open(os.path.join(src, "c.txt"), encoding="utf-8") as f:
+    check(f.read() == "src-version", "F1: 备份失败时胜者未覆盖(保持原状)")
+with open(os.path.join(dst, "c.txt"), encoding="utf-8") as f:
+    check(f.read() == "dst-version", "F1: 备份失败时落败方数据未丢")
+
+# 覆盖失败 -> 同样计为失败，但备份已先行完成
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src")
+dst = os.path.join(d, "dst")
+os.makedirs(src)
+os.makedirs(dst)
+write(os.path.join(src, "c2.txt"), "src-version", mtime=1000.0)
+write(os.path.join(dst, "c2.txt"), "dst-version", mtime=2000.0)
+t2 = fresh_task(MODE_TWO_WAY, src, dst, conflict_policy=CONFLICT_SOURCE)
+_orig_docopy = _sync_engine._do_copy
+
+
+def _boom_docopy(fp, tp):
+    # type: (str, str) -> None
+    raise OSError("模拟覆盖失败")
+
+
+_sync_engine._do_copy = _boom_docopy
+try:
+    res2 = perform_sync(t2)
+finally:
+    _sync_engine._do_copy = _orig_docopy
+check(res2.get("fail_count") == 1 and t2.last_status == "部分失败",
+      "F1: 冲突覆盖失败计为失败(此前状态误报'成功')")
+backups27 = [x for x in os.listdir(dst) if x.startswith("c2.txt.conflict-")]
+check(len(backups27) == 1, "F1: 覆盖失败前落败方已先行备份")
+
+# ---------- 28. F2: mkdir/type_conflict 计数与摘要不漏报 ----------
+print("[28] F2: 动作计数与摘要")
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src")
+dst = os.path.join(d, "dst")
+os.makedirs(src)
+os.makedirs(dst)
+os.makedirs(os.path.join(src, "empty1"))
+os.makedirs(os.path.join(src, "empty2"))
+t = fresh_task(MODE_ONE_WAY, src, dst)
+res = perform_sync(t, dry_run=True)
+check(res["diff"].mkdir_count == 2, "F2: mkdir 动作计入计数")
+check("创建目录 2" in res["diff"].summary(),
+      "F2: 目录创建在摘要可见(此前显示全 0 漏报)")
+
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src")
+dst = os.path.join(d, "dst")
+os.makedirs(src)
+os.makedirs(dst)
+write(os.path.join(src, "x.txt"), "data")
+os.makedirs(os.path.join(dst, "x.txt"))
+t2 = fresh_task(MODE_ONE_WAY, src, dst)
+res2 = perform_sync(t2, dry_run=True)
+check(res2["diff"].type_conflict_count == 1, "F2: type_conflict 计入计数")
+check("类型冲突 1" in res2["diff"].summary(), "F2: 类型冲突在摘要可见")
+
+# ---------- 29. F4: interval 校验仅限 interval 类型 + 解析兜底 ----------
+print("[29] F4: 校验放宽与解析兜底")
+check(validate_schedule_input(True, SCHED_DAILY, "abc", "08:00", "1") is None,
+      "校验: daily 下非法间隔不再拦截(间隔与该类型无关)")
+check(validate_schedule_input(True, SCHED_WEEKLY, "", "09:00", "1,3") is None,
+      "校验: weekly 下空间隔不再拦截")
+check(validate_schedule_input(True, SCHED_INTERVAL, "abc", "", "") is not None,
+      "校验: interval 下非法间隔仍被拦截")
+
+_err_box_calls[:] = []
+d = _mk_dialog()
+d._sched_on = _FakeVar(True)
+d._sched_type = _FakeCombo(_SL[_SD])
+d._interval = _FakeEntry("abc")
+d._on_save()
+check(d.result is not None and _err_box_calls == [],
+      "保存: daily + 非法间隔不弹错且成功保存")
+check(d.result.schedule.interval_minutes == 60,
+      "保存: 非法间隔回退默认 60(解析不崩溃)")
+
+# ---------- 30. F5: daily/weekly 停机错过补跑 ----------
+print("[30] F5: daily/weekly 停机补跑")
+from utils.timeutil import prev_daily_time, prev_weekly_time
+
+# 纯函数：确定性断言（基准日 2026-08-19 为周三，本地时区自洽）
+from_e30 = _dt.datetime(2026, 8, 19, 9, 30).timestamp()
+check(prev_daily_time(["08:00"], from_e30) == _dt.datetime(2026, 8, 19, 8, 0).timestamp(),
+      "prev_daily: 今天已过时刻")
+check(prev_daily_time(["10:00"], from_e30) == _dt.datetime(2026, 8, 18, 10, 0).timestamp(),
+      "prev_daily: 今天未到取昨天")
+check(prev_daily_time(["8点"], from_e30) is None, "prev_daily: 全非法 -> None")
+check(prev_weekly_time([3], ["10:00"], from_e30) == _dt.datetime(2026, 8, 12, 10, 0).timestamp(),
+      "prev_weekly: 本周已过取上周三")
+from_e30b = _dt.datetime(2026, 8, 19, 10, 30).timestamp()
+check(prev_weekly_time([3], ["10:00"], from_e30b) == _dt.datetime(2026, 8, 19, 10, 0).timestamp(),
+      "prev_weekly: 今天已过取今天")
+
+# 调度链路：错过 daily 时刻(last_run 更早) -> 启动补跑一次
+def _mk_sched_task(sched_type, times, weekdays=None, last_run=None):
+    # type: (str, list, Optional[list], Optional[float]) -> Task
+    tsk = fresh_task(MODE_ONE_WAY, src, dst)
+    tsk.schedule.enabled = True
+    tsk.schedule.type = sched_type
+    tsk.schedule.times = times
+    if weekdays is not None:
+        tsk.schedule.weekdays = weekdays
+    tsk.last_run = last_run
+    return tsk
+
+
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src")
+dst = os.path.join(d, "dst")
+os.makedirs(src)
+os.makedirs(dst)
+past_t = time.strftime("%H:%M", time.localtime(time.time() - 300))  # 5 分钟前已过的时刻
+store30 = TaskStore(os.path.join(d, "tasks.json"))
+td30 = _mk_sched_task(SCHED_DAILY, [past_t], last_run=time.time() - 7200)
+store30.add(td30)
+ran30 = []
+sched30 = Scheduler(store30, lambda t: ran30.append(t.id))
+sched30._poll_once()
+deadline30 = time.time() + 5
+while time.time() < deadline30 and td30.id not in ran30:
+    time.sleep(0.05)
+check(td30.id in ran30, "F5: daily 停机错过的时刻启动后补跑一次")
+check(td30.next_run is None or td30.next_run > time.time(),
+      "F5: 补跑后 next_run 指向未来(不连续重复触发)")
+sched30.stop()
+
+# 今天已跑过(last_run 晚于已过时刻) -> 不补跑
+store30b = TaskStore(os.path.join(d, "tasks.json2"))
+td30b = _mk_sched_task(SCHED_DAILY, [past_t], last_run=time.time() - 30)
+store30b.add(td30b)
+ran30b = []
+sched30b = Scheduler(store30b, lambda t: ran30b.append(t.id))
+sched30b._poll_once()
+check(td30b.id not in ran30b and td30b.next_run is not None and td30b.next_run > time.time(),
+      "F5: 今天已运行过不重复补跑")
+sched30b.stop()
+
+# weekly 错过补跑：选中今天与昨天（防跨日周几翻转）、时刻已过、last_run 更早
+store30c = TaskStore(os.path.join(d, "tasks.json3"))
+td30c = _mk_sched_task(SCHED_WEEKLY, [past_t],
+                       weekdays=[time.localtime().tm_wday + 1,
+                                 time.localtime(time.time() - 86400).tm_wday + 1],
+                       last_run=time.time() - 7200)
+store30c.add(td30c)
+ran30c = []
+sched30c = Scheduler(store30c, lambda t: ran30c.append(t.id))
+sched30c._poll_once()
+deadline30c = time.time() + 5
+while time.time() < deadline30c and td30c.id not in ran30c:
+    time.sleep(0.05)
+check(td30c.id in ran30c, "F5: weekly 停机错过的时刻启动后补跑一次")
+sched30c.stop()
+
+# ---------- 31. F6: baseline 取执行后真实状态（dirty 路径直接 stat） ----------
+print("[31] F6: baseline 状态新鲜度")
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src")
+dst = os.path.join(d, "dst")
+os.makedirs(src)
+os.makedirs(dst)
+T31 = 1700000200.0
+write(os.path.join(src, "y.txt"), "v1", mtime=T31)
+write(os.path.join(src, "seed.txt"), "seed", mtime=T31)
+t31 = fresh_task(MODE_TWO_WAY, src, dst)
+perform_sync(t31)   # 建立 baseline（y.txt 复制到 dst）
+st31 = os.stat(os.path.join(dst, "y.txt"))
+bl31 = t31.baseline.get("y.txt", {})
+check(bl31.get("mtime") == st31.st_mtime and bl31.get("size") == st31.st_size,
+      "F6: baseline mtime/size 与执行后目标侧真实状态一致")
+# A 侧删除 + two_way_delete -> B 侧删除后 baseline 条目消失，再次同步无差异
+os.remove(os.path.join(src, "seed.txt"))
+t31.two_way_delete = True
+perform_sync(t31)
+check("seed.txt" not in t31.baseline, "F6: 删除传播后 baseline 条目移除")
+res31 = perform_sync(t31, dry_run=True)
+check(res31["diff"].is_empty(), "F6: 删除传播后再次同步无差异(收敛)")
+
+# ---------- 32. 回归: C1/C2 数据安全 + 冲突策略矩阵 + 持久层清洗 + CLI 退出码 ----------
+print("[32] 回归: C1 源不可达 / C2 冲突不固化 / 策略矩阵 / 持久层清洗")
+from config import CONFLICT_SKIP, CONFLICT_TARGET, CONFLICT_ASK
+
+# --- C1: 源目录不可达(U 盘拔出/盘符漂移) -> 中止，绝不删除目标 ---
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src")
+dst = os.path.join(d, "dst")
+os.makedirs(src)
+os.makedirs(dst)
+write(os.path.join(src, "a.txt"), "hello")
+t = fresh_task(MODE_ONE_WAY, src, dst, one_way_delete=True)
+perform_sync(t)
+check(os.path.exists(os.path.join(dst, "a.txt")), "C1 前置: 首次同步完成")
+shutil.rmtree(src)   # 模拟源目录消失
+t2 = fresh_task(MODE_ONE_WAY, src, dst, one_way_delete=True)
+res = perform_sync(t2)
+check(res.get("aborted") is True, "C1: 源不可达时同步中止(aborted)")
+check(t2.last_status == "失败", "C1: 任务状态置'失败'")
+check(os.path.exists(os.path.join(dst, "a.txt")), "C1: 目标文件未被误删(此前的全量删除)")
+
+# --- C1b: 扫描不完整(子目录权限等) -> 同样中止 ---
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src")
+dst = os.path.join(d, "dst")
+os.makedirs(src)
+os.makedirs(dst)
+write(os.path.join(src, "a.txt"), "hello")
+write(os.path.join(dst, "keep.txt"), "keep")
+t3 = fresh_task(MODE_ONE_WAY, src, dst, one_way_delete=True)
+
+
+def _err_scan32(directory, **kw):
+    # type: (str, **Any) -> Dict[str, FileMeta]
+    sink = kw.get("error_sink")
+    if sink is not None:
+        sink.append("模拟扫描错误: %s" % directory)
+    return {}
+
+
+_orig_scan32 = _sync_engine.scan
+_sync_engine.scan = _err_scan32
+try:
+    res3 = perform_sync(t3)
+finally:
+    _sync_engine.scan = _orig_scan32
+check(res3.get("aborted") is True and t3.last_status == "失败",
+      "C1b: 扫描不完整时中止(宁失败不误删)")
+check(os.path.exists(os.path.join(dst, "keep.txt")), "C1b: 快照不完整时目标未被误删")
+
+# --- C2: skip 的冲突不写 baseline -> 下次重新检出冲突，不被固化为单侧覆盖 ---
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src")
+dst = os.path.join(d, "dst")
+os.makedirs(src)
+os.makedirs(dst)
+T32 = 1700000400.0
+write(os.path.join(src, "c.txt"), "src-v", mtime=T32)
+write(os.path.join(dst, "c.txt"), "dst-v", mtime=T32 + 10)
+t4 = fresh_task(MODE_TWO_WAY, src, dst, conflict_policy=CONFLICT_SKIP)
+res4 = perform_sync(t4)
+check(res4["diff"].conflict_count == 1, "C2 前置: 检出 1 个冲突")
+check("c.txt" not in t4.baseline, "C2: skip 冲突不写入 baseline")
+res4b = perform_sync(t4, dry_run=True)
+check(res4b["diff"].conflict_count == 1,
+      "C2: 下次同步重新检出冲突(未退化成无备份的单侧覆盖)")
+
+# --- 冲突策略矩阵: target_wins ---
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src")
+dst = os.path.join(d, "dst")
+os.makedirs(src)
+os.makedirs(dst)
+write(os.path.join(src, "tw.txt"), "src-newer", mtime=3000.0)
+write(os.path.join(dst, "tw.txt"), "dst-older", mtime=2000.0)  # 源更新,验证 target_wins 非按 mtime
+t5 = fresh_task(MODE_TWO_WAY, src, dst, conflict_policy=CONFLICT_TARGET)
+perform_sync(t5)
+with open(os.path.join(src, "tw.txt"), encoding="utf-8") as f:
+    _v5a = f.read()
+with open(os.path.join(dst, "tw.txt"), encoding="utf-8") as f:
+    _v5b = f.read()
+check(_v5a == _v5b == "dst-older", "策略: target_wins 目标侧胜出(覆盖更新的源)")
+check(len([x for x in os.listdir(src) if x.startswith("tw.txt.conflict-")]) == 1,
+      "策略: target_wins 落败方(源)已备份")
+
+# --- ask 回退: on_ask 抛异常 -> 保守跳过 ---
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src")
+dst = os.path.join(d, "dst")
+os.makedirs(src)
+os.makedirs(dst)
+write(os.path.join(src, "ask1.txt"), "src-v", mtime=1000.0)
+write(os.path.join(dst, "ask1.txt"), "dst-v", mtime=2000.0)
+
+
+def _ask_boom32(action):
+    # type: (Any) -> str
+    raise RuntimeError("询问通道故障")
+
+
+t6 = fresh_task(MODE_TWO_WAY, src, dst, conflict_policy=CONFLICT_ASK)
+res6 = perform_sync(t6, on_ask=_ask_boom32)
+check(res6["diff"].conflict_count == 1, "ask 回退: 冲突仍被检出")
+with open(os.path.join(src, "ask1.txt"), encoding="utf-8") as f:
+    check(f.read() == "src-v", "ask 回退: 异常时源侧保持原状")
+with open(os.path.join(dst, "ask1.txt"), encoding="utf-8") as f:
+    check(f.read() == "dst-v", "ask 回退: 异常时目标侧保持原状")
+check("ask1.txt" not in t6.baseline, "ask 回退: 异常回退 skip 的冲突不写 baseline")
+
+# --- ask 回退: 返回无效值 -> 跳过 ---
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src")
+dst = os.path.join(d, "dst")
+os.makedirs(src)
+os.makedirs(dst)
+write(os.path.join(src, "ask2.txt"), "src-v2", mtime=1000.0)
+write(os.path.join(dst, "ask2.txt"), "dst-v2", mtime=2000.0)
+
+
+def _ask_bad32(action):
+    # type: (Any) -> str
+    return "garbage-value"
+
+
+t7 = fresh_task(MODE_TWO_WAY, src, dst, conflict_policy=CONFLICT_ASK)
+res7 = perform_sync(t7, on_ask=_ask_bad32)
+check(res7["diff"].conflict_count == 1, "ask 无效返回: 冲突仍被检出")
+with open(os.path.join(src, "ask2.txt"), encoding="utf-8") as f:
+    _v7a = f.read()
+with open(os.path.join(dst, "ask2.txt"), encoding="utf-8") as f:
+    _v7b = f.read()
+check(_v7a == "src-v2" and _v7b == "dst-v2", "ask 无效返回: 按跳过处理(两侧原状)")
+check("ask2.txt" not in t7.baseline, "ask 无效返回: 冲突不写 baseline")
+
+# --- ask 正常: 返回 source_wins -> 生效 ---
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src")
+dst = os.path.join(d, "dst")
+os.makedirs(src)
+os.makedirs(dst)
+write(os.path.join(src, "ask3.txt"), "src-v3", mtime=1000.0)
+write(os.path.join(dst, "ask3.txt"), "dst-v3", mtime=2000.0)
+
+
+def _ask_src32(action):
+    # type: (Any) -> str
+    return CONFLICT_SOURCE
+
+
+t8 = fresh_task(MODE_TWO_WAY, src, dst, conflict_policy=CONFLICT_ASK)
+perform_sync(t8, on_ask=_ask_src32)
+with open(os.path.join(dst, "ask3.txt"), encoding="utf-8") as f:
+    check(f.read() == "src-v3", "ask 正常返回: source_wins 生效(覆盖更新的目标)")
+check(len([x for x in os.listdir(dst) if x.startswith("ask3.txt.conflict-")]) == 1,
+      "ask 正常返回: 落败方(目标)已备份")
+
+# --- ask + 无人值守(on_ask=None) -> 回退 newer_wins ---
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src")
+dst = os.path.join(d, "dst")
+os.makedirs(src)
+os.makedirs(dst)
+write(os.path.join(src, "ask4.txt"), "src-newer", mtime=3000.0)
+write(os.path.join(dst, "ask4.txt"), "dst-older", mtime=2000.0)
+t9 = fresh_task(MODE_TWO_WAY, src, dst, conflict_policy=CONFLICT_ASK)
+perform_sync(t9)   # 不传 on_ask(调度器/CLI 场景)
+with open(os.path.join(src, "ask4.txt"), encoding="utf-8") as f:
+    _v9a = f.read()
+with open(os.path.join(dst, "ask4.txt"), encoding="utf-8") as f:
+    _v9b = f.read()
+check(_v9a == _v9b == "src-newer", "ask 无人值守: 回退 newer_wins(不卡死)")
+
+# --- 持久层清洗: Schedule.from_dict / Task.from_dict ---
+s32 = _Sched.from_dict({"enabled": "yes", "type": "bogus", "interval_minutes": "abc",
+                        "times": ["08:00", " 09:30 ", "25:99", 123, None],
+                        "weekdays": [0, 3, 9, "2", "abc", 3]})
+check(s32.type == SCHED_INTERVAL and s32.interval_minutes == 60,
+      "清洗: 非法类型/间隔回退默认")
+check(s32.times == ["08:00", "09:30"], "清洗: times 仅保留合法时刻")
+check(s32.weekdays == [3, 2], "清洗: weekdays 剔除越界/非数值并去重")
+check(_Sched.from_dict(None).interval_minutes == 60, "清洗: None dict 全默认")
+
+td32 = Task.from_dict({"last_run": "abc", "mode": "xxx", "conflict_policy": "xxx",
+                       "name": 123, "source": None, "enabled": 0,
+                       "schedule": {"type": "daily", "times": ["8:00"],
+                                    "interval_minutes": -5}})
+check(td32.last_run is None, "清洗: last_run 非数值回退 None")
+check(td32.mode == MODE_ONE_WAY and td32.conflict_policy == CONFLICT_NEWER,
+      "清洗: 白名单外回退默认")
+check(td32.name == "" and td32.source == "" and td32.enabled is False,
+      "清洗: 字段类型收敛")
+check(td32.schedule.type == "daily" and td32.schedule.times == ["8:00"]
+      and td32.schedule.interval_minutes == 60, "清洗: 嵌套 Schedule 同样净化")
+check(Task.from_dict({"last_run": True}).last_run is None,
+      "清洗: bool last_run 视为非法(不当作 epoch=1)")
+
+# --- CLI 退出码 2: 部分失败 ---
+d = tempfile.mkdtemp()
+cfg = os.path.join(d, "config", "tasks.json")
+os.makedirs(os.path.dirname(cfg))
+src = os.path.join(d, "src")
+dst = os.path.join(d, "dst")
+os.makedirs(src)
+os.makedirs(dst)
+write(os.path.join(src, "ok.txt"), "ok")
+write(os.path.join(src, "bad.txt"), "bad")
+os.makedirs(os.path.join(dst, "bad.txt"))   # 同名目录 -> 类型冲突 -> 失败 1
+store32 = TaskStore(cfg)
+t32 = fresh_task(MODE_ONE_WAY, src, dst, one_way_delete=False)
+t32.name = "部分失败"
+store32.add(t32)
+rc32, out32 = _cli(["--sync", "部分失败"], d)
+check(rc32 == 2, "CLI: 部分失败退出码 2")
+check("失败 1" in out32, "CLI: 部分失败摘要含失败数")
+check(os.path.exists(os.path.join(dst, "ok.txt")), "CLI: 部分失败时成功项仍完成")
+
+# --- CLI 异常路径: 失败状态落盘(不残留上次'成功') ---
+def _boom32(task, **kw):
+    # type: (Task, **Any) -> None
+    raise RuntimeError("模拟同步异常")
+
+
+_orig_ps32 = _sync_engine.perform_sync
+_sync_engine.perform_sync = _boom32
+try:
+    rc33, out33 = _cli(["--sync", "部分失败"], d)
+    check(rc33 == 3 and "同步失败" in out33, "CLI: 异常路径退出码 3")
+finally:
+    _sync_engine.perform_sync = _orig_ps32
+store33 = TaskStore(cfg)
+t33 = store33.get(t32.id)
+check(t33 is not None and t33.last_status == "失败" and "执行异常" in t33.last_summary,
+      "CLI: 异常路径失败状态已落盘")
+
+# --- 任务名查重(TaskDialog) ---
+class _FakeStore32(object):
+    def __init__(self, tasks):
+        # type: (list) -> None
+        self.tasks = tasks
+
+
+_existing32 = fresh_task(MODE_ONE_WAY, src25, dst25)
+_existing32.name = "任务A"
+_store32 = _FakeStore32([_existing32])
+
+_err_box_calls[:] = []
+d = _mk_dialog()
+d.store = _store32
+d._on_save()
+check(len(_err_box_calls) == 1 and d.result is None and "同名" in _err_box_calls[0][1],
+      "查重: 新建同名任务被拦截")
+
+_err_box_calls[:] = []
+d = _mk_dialog()
+d.store = _store32
+d.is_new = False
+d.task = _existing32
+d._on_save()
+check(d.result is not None and _err_box_calls == [], "查重: 编辑自身不误拦")
+
+_err_box_calls[:] = []
+d = _mk_dialog()
+d.store = None
+d._on_save()
+check(d.result is not None and _err_box_calls == [], "查重: store 缺失时跳过查重不崩溃")
 
 # ---------- 清理 ----------
 print("\n结果：%s" % ("全部通过" if not failures else "%d 项失败" % len(failures)))

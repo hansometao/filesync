@@ -16,6 +16,7 @@
 
 import os
 import sys
+import time
 from typing import Any, Callable, Optional
 
 # Windows 7 DPI 适配（最佳努力，失败不影响功能）
@@ -134,6 +135,11 @@ def run_cli(argv, app_dir=None):
     except Exception as e:
         # 无头模式任何业务异常都要可控退出，避免未捕获 traceback
         print("同步失败 [%s]: %s" % (task.name, e))
+        # 异常路径同样落盘失败状态（与引擎 _abort 一致），
+        # 否则 tasks.json 停留上次的"成功"，无人值守时无从察觉
+        task.last_run = time.time()
+        task.last_status = "失败"
+        task.last_summary = "执行异常: %s" % e
         store.update_runtime(task)
         return 3
     finalize_sync(task, res, store)

@@ -13,7 +13,7 @@ import sys
 import time
 import queue
 import threading
-from typing import Optional
+from typing import Any, Callable, List, Optional
 
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
@@ -61,6 +61,15 @@ class App(object):
         self._tick_id = None               # type: Optional[str]
         self._drain_id = None              # type: Optional[str]
         self._ui_queue = queue.Queue()     # type: queue.Queue  # worker -> UI 的唯一通道
+        # 手动同步 worker（diff/apply）登记表：on_close 与调度 worker 一起
+        # 有界等待。此前手动线程游离在 wait_workers 之外，进程退出时被强杀，
+        # 大文件复制中途被杀会留下半截文件
+        self._workers = []                 # type: List[threading.Thread]
+        self._workers_lock = threading.Lock()
+        # 手动同步全局门闩：_cancel/_wait 为单例，跨任务并发手动同步会互相
+        # 干扰（后者 clear 掉前者的取消标志 / 销毁前者的等待窗）。
+        # 运行槽只防同一任务并发，这里补跨任务互斥
+        self._manual_busy = False
 
         self._build_ui()
         self.logger.add_callback(self._on_log)
@@ -214,6 +223,8 @@ class App(object):
                 self.store.update(dlg.result)
                 dlg.result.next_run = None  # 重置，让调度器按新配置重算下次触发
                 self._refresh_tasks(full=True)
+                # 与新增任务一致：编辑后若存在启用的定时任务则自动拉起调度器
+                self._maybe_autostart()
         finally:
             self.scheduler.release(task.id)
 
@@ -235,6 +246,33 @@ class App(object):
             self.scheduler.release(task.id)
 
     # ---------- 同步预览/执行 ----------
+    def _start_worker(self, target, args=()):
+        # type: (Callable[..., Any], Any) -> None
+        """启动并登记手动同步 worker（见 _workers 注释）。"""
+        t = threading.Thread(target=self._worker_wrapper, args=(target, args),
+                             daemon=True)
+        with self._workers_lock:
+            self._workers.append(t)
+        t.start()
+
+    def _worker_wrapper(self, target, args):
+        # type: (Callable[..., Any], Any) -> None
+        cur = threading.current_thread()
+        try:
+            target(*args)
+        finally:
+            with self._workers_lock:
+                try:
+                    self._workers.remove(cur)
+                except ValueError:
+                    pass
+
+    def _release_manual(self, task_id):
+        # type: (str) -> None
+        """释放手动同步的运行槽与全局门闩（仅手动同步路径调用）。"""
+        self._manual_busy = False
+        self.scheduler.release(task_id)
+
     def _on_sync_now(self):
         # type: () -> None
         task = self._selected_task()
@@ -245,15 +283,25 @@ class App(object):
         if not task.enabled:
             messagebox.showinfo("提示", "该任务已禁用，请先在编辑中启用后再同步")
             return
+        if self._manual_busy:
+            messagebox.showinfo("提示", "已有手动同步正在进行，请等待完成")
+            return
         # 从预览开始就占用运行槽：预览期间调度器不会并发触发，预览/执行一致
         if not self.scheduler.acquire(task.id):
             messagebox.showinfo("提示", "该任务正在运行中，请稍候")
             return
-        self._cancel.clear()
-        self._prog_count = 0
-        self._last_prog_ts = 0.0
-        self._show_wait("正在扫描并对比差异...", cancellable=True)
-        threading.Thread(target=self._diff_worker, args=(task,), daemon=True).start()
+        self._manual_busy = True
+        try:
+            self._cancel.clear()
+            self._prog_count = 0
+            self._last_prog_ts = 0.0
+            self._show_wait("正在扫描并对比差异...", cancellable=True)
+        except Exception as e:
+            # 等待窗创建失败时必须释放运行槽与门闩，否则任务永久"运行中"
+            self.logger.error("打开等待窗失败: %s" % e)
+            self._release_manual(task.id)
+            return
+        self._start_worker(self._diff_worker, (task,))
 
     def _progress_cb(self, rel):
         # type: (str) -> None
@@ -276,13 +324,13 @@ class App(object):
                                cancel_event=self._cancel)
             self._ui_put(lambda: self._on_diff_ready(task, res))
         except ScanCancelled:
-            self.scheduler.release(task.id)
+            self._release_manual(task.id)
             self._ui_put(self._hide_wait)
             self._ui_put(lambda: messagebox.showinfo("提示", "已取消"))
             self._ui_put(self._refresh_tasks)
         except Exception as e:
             self.logger.error("对比失败 [%s]: %s" % (task.name, e))
-            self.scheduler.release(task.id)
+            self._release_manual(task.id)
             self._ui_put(self._hide_wait)
             self._ui_put(lambda: messagebox.showerror("错误", "对比失败：%s" % e))
             self._ui_put(self._refresh_tasks)
@@ -293,27 +341,51 @@ class App(object):
         # 任何异常都必须释放运行槽，否则任务永久显示"运行中"，编辑/删除/同步全被拒。
         try:
             self._hide_wait()
+            if self._closing:
+                # 关闭流程已启动（用户已明确退出）：只释放运行槽，不再弹预览/
+                # 启动执行线程（on_close 已 _cancel.set()，预览结果的时效也无意义）
+                self._release_manual(task.id)
+                return
+            if res.get("aborted"):
+                # 引擎中止（源目录不可达/扫描不完整）：明确报错，
+                # 不能因 diff 为空而误报"无需同步（无差异）"
+                self._release_manual(task.id)
+                self._refresh_tasks(full=False)
+                messagebox.showerror("错误", "同步已中止：%s" % task.last_summary)
+                return
+            if res["diff"].is_empty():
+                # 无差异：无需确认，直接收尾（所见即所得——0 个动作无可执行）
+                self._release_manual(task.id)
+                self._refresh_tasks(full=False)
+                messagebox.showinfo("提示", "无需同步（无差异）")
+                return
             from gui_diff import DiffDialog
             dlg = DiffDialog(self.root, res["diff"], task)
             self.root.wait_window(dlg)
+            if self._closing:
+                # 预览期间主窗口已关闭：放弃执行（关闭流程已 _cancel.set()，
+                # 此处的 _cancel.clear() 不再执行，避免抵消取消信号后启动
+                # 一个 wait_workers 等不到的写盘线程，被进程退出强杀）
+                self._release_manual(task.id)
+                return
             if dlg.result_policy is None:
                 # 取消预览：释放运行槽
-                self.scheduler.release(task.id)
+                self._release_manual(task.id)
                 self._refresh_tasks(full=False)
                 return
             if dlg.result_policy == "_noop_":
-                self.scheduler.release(task.id)
+                self._release_manual(task.id)
                 self._refresh_tasks(full=False)
                 messagebox.showinfo("提示", "无需同步（无差异）")
                 return
             policy = dlg.result_policy if dlg.result_policy != CONFLICT_ASK else None
             self._cancel.clear()  # 确保已确认的执行为干净运行，不被残留取消标志秒变 no-op
             self._show_wait("正在执行同步...", cancellable=True)
-            threading.Thread(target=self._apply_worker, args=(task, res, policy), daemon=True).start()
+            self._start_worker(self._apply_worker, (task, res, policy))
         except Exception as e:
             self.logger.error("预览/执行准备异常 [%s]: %s" % (task.name, e))
             try:
-                self.scheduler.release(task.id)
+                self._release_manual(task.id)
             except Exception:
                 pass
             try:
@@ -345,10 +417,18 @@ class App(object):
             self._ui_put(lambda: messagebox.showinfo("提示", "已取消"))
         except Exception as e:
             self.logger.error("同步失败 [%s]: %s" % (task.name, e))
+            # 异常路径落盘失败状态（与 _run_task 一致），避免停留上次的"成功"
+            task.last_run = time.time()
+            task.last_status = "失败"
+            task.last_summary = "执行异常: %s" % e
+            try:
+                self.store.update_runtime(task)
+            except Exception:
+                pass
             self._ui_put(self._hide_wait)
             self._ui_put(lambda: messagebox.showerror("错误", "同步失败：%s" % e))
         finally:
-            self.scheduler.release(task.id)
+            self._release_manual(task.id)
             self._ui_put(self._refresh_tasks)
 
     # ---------- 调度器回调（工作线程中调用） ----------
@@ -359,6 +439,15 @@ class App(object):
             finalize_sync(task, res, self.store, self.logger)
         except Exception as e:
             self.logger.error("任务执行异常 [%s]: %s" % (task.name, e))
+            # 异常路径同样落盘失败状态：否则界面与 tasks.json 里停留上一次的
+            # "成功"，调度持续失败时用户无从察觉
+            task.last_run = time.time()
+            task.last_status = "失败"
+            task.last_summary = "执行异常: %s" % e
+            try:
+                self.store.update_runtime(task)
+            except Exception:
+                pass
         finally:
             self._ui_put(self._refresh_tasks)
 
