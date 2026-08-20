@@ -161,6 +161,16 @@ class TaskDialog(tk.Toplevel):
         if not name:
             messagebox.showerror("错误", "请填写任务名称")
             return
+        # 任务名查重：任务列表、日志审计与 CLI --sync 都按名称辨认任务，
+        # 同名会让"按名称执行/排查"命中错误任务。编辑时排除自身。
+        if self.store is not None:
+            own_id = None
+            if not self.is_new and self.task is not None:
+                own_id = self.task.id
+            for t in getattr(self.store, "tasks", None) or []:
+                if t.name == name and t.id != own_id:
+                    messagebox.showerror("错误", "已存在同名任务：%s（名称需唯一）" % name)
+                    return
         if not src or not dst:
             messagebox.showerror("错误", "请选择源目录与目标目录")
             return
@@ -186,9 +196,12 @@ class TaskDialog(tk.Toplevel):
             pass  # Windows 不同盘符等，不可能互为子路径
 
         # 调度输入校验：interval/times/weekdays 抽为纯函数 validate_schedule_input
-        # （无 tkinter 依赖，可无头测试），此处仅负责错误弹窗展示
+        # （无 tkinter 依赖，可无头测试），此处仅负责错误弹窗展示。
+        # 注意：下拉框显示的是中文标签，必须先经 _SCHED_REV 还原内部值再校验——
+        # 此前把标签直接传入，与 SCHED_DAILY 等内部值永不相等，校验形同虚设
+        sched_type = _SCHED_REV.get(self._sched_type.get(), self._sched_type.get())
         err = validate_schedule_input(
-            bool(self._sched_on.get()), self._sched_type.get(),
+            bool(self._sched_on.get()), sched_type,
             self._interval.get(), self._times.get(), self._weekdays.get())
         if err:
             messagebox.showerror("错误", err)

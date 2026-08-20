@@ -26,7 +26,7 @@ jobs:
       - name: 编译检查（全部模块，含 type-comment 语法校验）
         run: python -m py_compile main.py config.py scheduler.py scanner.py sync_engine.py logger.py gui_app.py gui_diff.py gui_task_dialog.py utils/paths.py utils/timeutil.py build_exe.py make_icon.py
 
-      - name: 运行无头自测（31 节 174 项断言）
+      - name: 运行无头自测（32 节 216 项断言）
         run: python test_sync.py
 
   mypy:
@@ -41,8 +41,9 @@ jobs:
           python-version: '3.8'
 
       - name: 安装 mypy
-        run: pip install mypy
+        # 固定版本：1.14.1 是最后一个支持在 Python 3.8 上运行、
+        # 且支持 --python-version 3.8 目标的 mypy（1.15+ 均已放弃 3.8）
+        run: pip install "mypy==1.14.1"
 
       - name: mypy 严格类型检查
-        run: mypy --config-file mypy.ini main.py config.py scheduler.py scanner.py sync_engine.py logger.py gui_task_dialog.py gui_diff.py utils/paths.py utils/timeutil.py
-        continue-on-error: true  # 本地无 pip 环境无法预验证，先允许失败，验证通过后移除
+        run: mypy --config-file mypy.ini main.py config.py scheduler.py scanner.py sync_engine.py logger.py gui_app.py gui_task_dialog.py gui_diff.py utils/paths.py utils/timeutil.py

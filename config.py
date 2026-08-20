@@ -48,6 +48,11 @@ SCHED_INTERVAL = "interval"
 SCHED_DAILY = "daily"
 SCHED_WEEKLY = "weekly"
 
+# HH:MM 与周几(1-7)的格式校验正则：表单校验（validate_schedule_input）、
+# 表单解析（gui_task_dialog._on_save）与持久层清洗（Schedule.from_dict）共用一份
+HHMM_RE = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
+WEEKDAY_RE = re.compile(r"^[1-7]$")
+
 
 def validate_schedule_input(sched_enabled, sched_type, interval_text, times_text, weekdays_text):
     # type: (bool, str, str, str, str) -> Optional[str]
@@ -66,19 +71,23 @@ def validate_schedule_input(sched_enabled, sched_type, interval_text, times_text
             return "间隔(分钟)必须是整数，当前值：%s" % interval_text
         if interval < 1:
             return "间隔(分钟)必须是正整数（>=1）"
-    times = [t.strip() for t in times_text.split(",") if t.strip()]
-    for t in times:
-        if not re.match(r"^([01]?\d|2[0-3]):[0-5]\d$", t):
-            return "每日时刻格式应为 HH:MM（00:00-23:59），非法值：%s" % t
-    if sched_enabled and sched_type in (SCHED_DAILY, SCHED_WEEKLY) and not times:
-        return "启用每日/每周定时时请至少填写一个时刻，如 08:00,20:00"
-    weekdays = []
-    for w in [x.strip() for x in weekdays_text.split(",") if x.strip()]:
-        if not re.match(r"^[1-7]$", w):
-            return "每周(1-7)应为 1-7 的数字（1=周一…7=周日），非法值：%s" % w
-        weekdays.append(int(w))
-    if sched_enabled and sched_type == SCHED_WEEKLY and not weekdays:
-        return "启用每周定时时请至少填写一个周几，如 1,3,5（1=周一）"
+    # 时刻/周几的格式校验同样只对启用中的 daily/weekly 生效：
+    # interval 类型下这两栏的残留输入与当前任务无关，不应拦截保存
+    # （解析侧同样只保留合法值，垃圾输入不会进入 Task）
+    if sched_enabled and sched_type in (SCHED_DAILY, SCHED_WEEKLY):
+        times = [t.strip() for t in times_text.split(",") if t.strip()]
+        for t in times:
+            if not HHMM_RE.match(t):
+                return "每日时刻格式应为 HH:MM（00:00-23:59），非法值：%s" % t
+        if not times:
+            return "启用每日/每周定时时请至少填写一个时刻，如 08:00,20:00"
+        weekdays = []
+        for w in [x.strip() for x in weekdays_text.split(",") if x.strip()]:
+            if not WEEKDAY_RE.match(w):
+                return "每周(1-7)应为 1-7 的数字（1=周一…7=周日），非法值：%s" % w
+            weekdays.append(int(w))
+        if sched_enabled and sched_type == SCHED_WEEKLY and not weekdays:
+            return "启用每周定时时请至少填写一个周几，如 1,3,5（1=周一）"
     return None
 
 
@@ -103,13 +112,44 @@ class Schedule(object):
     @classmethod
     def from_dict(cls, d):
         # type: (Optional[Dict[str, Any]]) -> "Schedule"
+        """从 dict 重建 Schedule，逐字段防御性清洗。
+
+        tasks.json 可能被手工编辑或外部工具写坏：JSON 语法合法但字段类型
+        错误（如 interval_minutes="abc"、times=[{"x":1}]）的值若原样通过，
+        会在调度循环里每秒抛 TypeError/AttributeError——不仅这一个任务失效，
+        _poll_once 的 for 循环被打断后排在后面的所有任务都得不到轮询。
+        清洗原则：类型不对/取值越界就回退默认，坏数据不让调度瘫痪。
+        """
         d = d or {}
+        stype = d.get("type", SCHED_INTERVAL)
+        if stype not in (SCHED_INTERVAL, SCHED_DAILY, SCHED_WEEKLY):
+            stype = SCHED_INTERVAL
+        try:
+            interval = int(d.get("interval_minutes", 60))
+        except (TypeError, ValueError):
+            interval = 60
+        if interval < 1:
+            interval = 60
+        raw_times = d.get("times", [])
+        times = [t.strip() for t in raw_times
+                 if isinstance(t, str) and HHMM_RE.match(t.strip())] \
+            if isinstance(raw_times, list) else []
+        raw_wd = d.get("weekdays", [])
+        weekdays = []  # type: List[int]
+        if isinstance(raw_wd, list):
+            for w in raw_wd:
+                try:
+                    n = int(w)
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= n <= 7 and n not in weekdays:
+                    weekdays.append(n)
         return cls(
             enabled=bool(d.get("enabled", False)),
-            type=d.get("type", SCHED_INTERVAL),
-            interval_minutes=int(d.get("interval_minutes", 60)),
-            times=list(d.get("times", []) or []),
-            weekdays=list(d.get("weekdays", []) or []),
+            type=stype,
+            interval_minutes=interval,
+            times=times,
+            weekdays=weekdays,
         )
 
 
@@ -159,22 +199,35 @@ class Task(object):
     @classmethod
     def from_dict(cls, d):
         # type: (Dict[str, Any]) -> "Task"
+        """从 dict 重建 Task。与 Schedule.from_dict 同理做字段清洗：
+        last_run 非数值（如 "abc"）会让调度器的 interval 锚点/补跑判定抛
+        TypeError；mode/conflict_policy 白名单外取值回退默认。"""
+        last_run = d.get("last_run")
+        # bool 是 int 子类：True 会被当成合法 epoch(1)，一并清洗掉
+        if isinstance(last_run, bool) or not isinstance(last_run, (int, float)):
+            last_run = None
+        mode = d.get("mode", MODE_ONE_WAY)
+        if mode not in (MODE_ONE_WAY, MODE_TWO_WAY):
+            mode = MODE_ONE_WAY
+        policy = d.get("conflict_policy", CONFLICT_NEWER)
+        if policy not in CONFLICT_POLICIES:
+            policy = CONFLICT_NEWER
         return cls(
             id=d.get("id") or uuid.uuid4().hex,
-            name=d.get("name", ""),
-            source=d.get("source", ""),
-            target=d.get("target", ""),
-            mode=d.get("mode", MODE_ONE_WAY),
+            name=d.get("name", "") if isinstance(d.get("name"), str) else "",
+            source=d.get("source", "") if isinstance(d.get("source"), str) else "",
+            target=d.get("target", "") if isinstance(d.get("target"), str) else "",
+            mode=mode,
             one_way_delete=bool(d.get("one_way_delete", False)),
             two_way_delete=bool(d.get("two_way_delete", False)),
             compare=d.get("compare", "auto"),
             schedule=Schedule.from_dict(d.get("schedule")),
             include=list(d.get("include", []) or []),
             exclude=list(d.get("exclude", []) or []),
-            conflict_policy=d.get("conflict_policy", CONFLICT_NEWER),
-            last_run=d.get("last_run"),
-            last_status=d.get("last_status", ""),
-            last_summary=d.get("last_summary", ""),
+            conflict_policy=policy,
+            last_run=last_run,
+            last_status=d.get("last_status", "") if isinstance(d.get("last_status"), str) else "",
+            last_summary=d.get("last_summary", "") if isinstance(d.get("last_summary"), str) else "",
             baseline=d.get("baseline", {}) or {},
             enabled=bool(d.get("enabled", True)),
         )
@@ -198,6 +251,8 @@ class TaskStore(object):
         self.tasks = []  # type: List[Task]
         # RLock 可重入：save() 可在 add/update/remove 持锁时嵌套调用
         self._lock = threading.RLock()
+        # 损坏配置未能隔离时置位：save() 拒写以防覆盖唯一可修复的原件
+        self._load_failed = False
         self.load()
 
     # ---------- baseline 独立持久化 ----------
@@ -230,19 +285,33 @@ class TaskStore(object):
         except (ValueError, OSError):
             pass
 
-    def _backup_corrupt(self):
-        # type: () -> None
-        """损坏的配置先保留现场副本，避免后续保存把唯一可修复的原文件覆盖掉。"""
+    def _quarantine_corrupt(self):
+        # type: () -> bool
+        """把损坏的配置移出原路径（保留现场副本），返回现场是否已保住。
+
+        优先改名（原路径不复存在，后续 save 写全新文件）；改名失败（如跨设备
+        /权限）退回复制副本。两者都失败返回 False——调用方必须保持只读保护，
+        否则后续任何 save() 都会把唯一可修复的原件覆盖掉。
+        """
+        ts = unique_stamp()
+        dst = "%s.corrupt-%s" % (self.path, ts)
         try:
-            ts = unique_stamp()
-            dst = "%s.corrupt-%s" % (self.path, ts)
-            shutil.copy2(self.path, dst)
-            _safe_print("检测到损坏的配置文件，已备份为 %s" % dst)
+            os.replace(self.path, dst)
+            _safe_print("检测到损坏的配置文件，已隔离为 %s" % dst)
+            return True
         except OSError:
             pass
+        try:
+            shutil.copy2(self.path, dst)
+            _safe_print("检测到损坏的配置文件，已保留副本 %s" % dst)
+            return True
+        except OSError as e:
+            _safe_print("配置损坏现场保留失败（保持只读保护）: %s" % e)
+            return False
 
     def load(self):
         # type: () -> None
+        self._load_failed = False
         # 此时 self.path 仍是上一次的完好版本，删 tmp 无副作用。
         try:
             tmp = self.path + ".tmp"
@@ -262,7 +331,9 @@ class TaskStore(object):
                 raise ValueError("配置格式不正确")
             self.tasks = [Task.from_dict(t) for t in data]
         except (ValueError, OSError, TypeError, AttributeError) as e:
-            self._backup_corrupt()
+            # 隔离失败时置只读保护：save() 会拒写并重试隔离，
+            # 保证"要么现场已移走，要么绝不覆盖原件"
+            self._load_failed = not self._quarantine_corrupt()
             self.tasks = []
             _safe_print("加载任务配置失败(已保留损坏副本): %s" % e)
             return
@@ -281,6 +352,12 @@ class TaskStore(object):
     def save(self):
         # type: () -> None
         with self._lock:
+            if self._load_failed:
+                # 损坏现场尚未保住：先重试隔离，仍失败则放弃本次写入。
+                # 宁可暂时改不了配置，也不能把唯一可修复的原件覆盖掉。
+                if not self._quarantine_corrupt():
+                    return
+                self._load_failed = False
             try:
                 d = os.path.dirname(self.path)
                 if d and not os.path.isdir(d):

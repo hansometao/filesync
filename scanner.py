@@ -37,33 +37,41 @@ class FileMeta(object):
         self.is_dir = is_dir
 
 
+def _make_hasher():
+    # type: () -> Any
+    """进程启动时探测一次哈希实现：优先 xxhash，回退 hashlib.md5。
+
+    固定为模块级工厂：一是省去热路径上每次调用的 import 查找；
+    二是保证同一进程内算法不漂移（xxh64 与 md5 摘要互不通用，
+    中途切换会让 baseline 已缓存的哈希全部失效，触发一轮无谓 modified）。
+    """
+    try:
+        import xxhash
+        return xxhash.xxh64
+    except (ImportError, AttributeError):
+        import hashlib
+        return hashlib.md5
+
+
+_HASHER = _make_hasher()  # type: Any
+
+
 def hash_file(path, chunk=1 << 20, cancel_event=None):
     # type: (str, int, Optional[Any]) -> Optional[str]
-    """计算文件内容哈希。优先 xxhash，回退 md5。失败返回 None。
+    """计算文件内容哈希（算法由 _make_hasher 固定）。失败返回 None。
 
     cancel_event 为 threading.Event；置位时在两个分块之间抛出 ScanCancelled，
     使大文件哈希可被取消（不阻塞同步取消）。
     """
     lp = longpath(path)
+    h = _HASHER()
     try:
-        try:
-            import xxhash  # mypy: ignore_missing_imports 全局处理，无需逐处 ignore
-            h = xxhash.xxh64()
-            with open(lp, "rb") as f:
-                for block in iter(lambda: f.read(chunk), b""):
-                    h.update(block)
-                    if cancel_event is not None and cancel_event.is_set():
-                        raise ScanCancelled()
-            return h.hexdigest()
-        except ImportError:
-            import hashlib
-            h = hashlib.md5()
-            with open(lp, "rb") as f:
-                for block in iter(lambda: f.read(chunk), b""):
-                    h.update(block)
-                    if cancel_event is not None and cancel_event.is_set():
-                        raise ScanCancelled()
-            return h.hexdigest()
+        with open(lp, "rb") as f:
+            for block in iter(lambda: f.read(chunk), b""):
+                h.update(block)
+                if cancel_event is not None and cancel_event.is_set():
+                    raise ScanCancelled()
+        return h.hexdigest()
     except ScanCancelled:
         raise
     except OSError as e:
@@ -95,14 +103,18 @@ def _excluded(rel, name, exclude):
 
 
 def scan(directory, include=None, exclude=None, self_paths=None, with_hash=False, progress=None,
-         cancel_event=None):
-    # type: (str, Optional[List[str]], Optional[List[str]], Optional[Set[str]], bool, Optional[Callable[[str], None]], Optional[Any]) -> Dict[str, FileMeta]
+         cancel_event=None, error_sink=None):
+    # type: (str, Optional[List[str]], Optional[List[str]], Optional[Set[str]], bool, Optional[Callable[[str], None]], Optional[Any], Optional[List[str]]) -> Dict[str, FileMeta]
     """递归扫描目录，返回 {相对路径: FileMeta}。
 
     - self_paths：要跳过的目录绝对路径集合（工具自身 config/logs）。
     - with_hash：是否直接计算每个文件的哈希（默认 False，按需计算）。
     - progress：可选回调 progress(relpath) 用于刷新 UI。
     - cancel_event：threading.Event；置位后在下一个文件/目录边界抛 ScanCancelled。
+    - error_sink：可选 list；扫描中途的错误（目录打不开/读不了 stat）除写日志外
+      追加到该列表。调用方（perform_sync）据此识别"快照不完整"并中止同步，
+      防止缺失条目被 diff 判成 removed 后经删除传播误删对侧。根目录不存在
+      **不**计入（目标侧不存在是首次同步的合法场景），源侧由调用方自行校验。
     """
     result = {}  # type: Dict[str, FileMeta]
     if include is None:
@@ -117,6 +129,12 @@ def scan(directory, include=None, exclude=None, self_paths=None, with_hash=False
         # type: () -> bool
         return cancel_event is not None and cancel_event.is_set()
 
+    def _scan_err(msg):
+        # type: (str) -> None
+        get_logger().warn(msg)
+        if error_sink is not None:
+            error_sink.append(msg)
+
     def recurse(root, rel_prefix):
         # type: (str, str) -> None
         if _cancelled():
@@ -124,7 +142,7 @@ def scan(directory, include=None, exclude=None, self_paths=None, with_hash=False
         try:
             entries = os.scandir(longpath(root) if is_longpath_supported() else root)
         except (OSError, PermissionError) as e:
-            get_logger().warn("无法扫描目录 %s: %s" % (root, e))
+            _scan_err("无法扫描目录 %s: %s" % (root, e))
             return
         for entry in entries:
             if _cancelled():
@@ -157,7 +175,7 @@ def scan(directory, include=None, exclude=None, self_paths=None, with_hash=False
                 try:
                     st = entry.stat(follow_symlinks=False)
                 except OSError as e:
-                    get_logger().warn("无法读取目录信息 %s: %s" % (rel, e))
+                    _scan_err("无法读取目录信息 %s: %s" % (rel, e))
                     continue
                 if (os.name == "nt"
                         and getattr(st, "st_file_attributes", 0) & 0x400):  # FILE_ATTRIBUTE_REPARSE_POINT
@@ -182,7 +200,7 @@ def scan(directory, include=None, exclude=None, self_paths=None, with_hash=False
                 try:
                     st = entry.stat()
                 except OSError as e:
-                    get_logger().warn("无法读取文件信息 %s: %s" % (rel, e))
+                    _scan_err("无法读取文件信息 %s: %s" % (rel, e))
                     continue
                 meta = FileMeta(st.st_size, st.st_mtime)
                 if with_hash:

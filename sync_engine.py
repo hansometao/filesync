@@ -24,7 +24,8 @@
 
 import os
 import shutil
-from typing import Any, Dict, List, Optional, Tuple
+import stat as stat_mod
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from utils.paths import longpath, join_rel, ensure_dir
 from utils.timeutil import is_newer, now_epoch, unique_stamp
@@ -287,8 +288,13 @@ def _do_delete(path):
     # type: (str) -> None
     """删除一个文件（或符号链接）。目录删除走专门的 rmdir action，不经此函数。"""
     lp = longpath(path)
+    if os.path.isdir(lp) and not os.path.islink(lp):
+        # diff 之后路径被外部改成目录（race）：按文件删除要么失败要么误删整目录，
+        # 不能静默假成功——计为失败，留给下次同步按类型冲突重新判定
+        raise OSError("待删除路径已变为目录，拒绝按文件删除: %s" % path)
     if os.path.isfile(lp) or os.path.islink(lp):
         os.remove(lp)
+    # 既非文件也非目录（已消失）视为成功：删除动作幂等
 
 
 def _prune_empty_dirs(path, root):
@@ -309,12 +315,16 @@ def _prune_empty_dirs(path, root):
 
 
 def _resolve_conflict(action, policy, on_ask=None):
-    # type: (Action, str, Optional[Any]) -> Tuple[str, bool]
-    """处理冲突。返回 (结果描述, 是否失败)。备份落败方后再覆盖，确保不丢数据。
+    # type: (Action, str, Optional[Any]) -> Tuple[str, bool, bool]
+    """处理冲突。返回 (结果描述, 是否失败, 是否未解决)。
 
+    备份落败方后再覆盖，确保不丢数据：
     - 备份落败方失败时不覆盖（README 承诺"绝不静默丢数据"），计为失败，
       冲突保持原状，下次同步重试；
     - 覆盖失败同样计为失败（计入 fail_count，任务状态才不会误报"成功"）。
+    - "未解决"（skip / 备份失败 / 覆盖失败）的 rel 由 apply_actions 汇总，
+      重建 baseline 时排除，保证下次同步重新进入冲突流程，而不是把
+      冲突"固化"成一次无备份的单侧覆盖。
     """
     logger = get_logger()
     a_path = action.from_path  # 源侧
@@ -322,10 +332,16 @@ def _resolve_conflict(action, policy, on_ask=None):
     # 冲突动作必然携带两侧路径（diff 构造时保证），assert 仅为类型收窄
     assert a_path is not None and b_path is not None
     if policy == CONFLICT_ASK and on_ask is not None:
-        policy = on_ask(action) or CONFLICT_NEWER
+        # 询问回调抛异常或返回无效值时保守跳过：用户"取消询问"的直觉语义
+        # 是"这次先不动"，而不是激进的 newer 覆盖
+        try:
+            got = on_ask(action)
+        except Exception:
+            got = None
+        policy = got if got in ("newer_wins", "source_wins", "target_wins", "skip") else "skip"
     if policy == "skip":
         logger.warn("冲突未处理(跳过): %s" % action.rel)
-        return "跳过冲突", False
+        return "跳过冲突", False, True
     # 选定胜者
     if policy == "source_wins":
         winner, loser = a_path, b_path
@@ -353,16 +369,16 @@ def _resolve_conflict(action, policy, on_ask=None):
         # 备份失败则不覆盖：覆盖成功而备份缺失会静默丢落败方数据，
         # 违背"先备份再覆盖"的承诺；保持冲突原状，下次同步重试
         logger.error("冲突备份失败，跳过覆盖 %s: %s" % (loser, e))
-        return "冲突处理失败(备份不成,未覆盖)", True
+        return "冲突处理失败(备份不成,未覆盖)", True, True
     # 用胜者覆盖落败方
     try:
         _do_copy(winner, loser)
     except OSError as e:
         logger.error("冲突覆盖失败 %s: %s" % (loser, e))
-        return "冲突处理失败", True
+        return "冲突处理失败", True, True
     logger.info("冲突已解决(胜者:%s, 备份:%s): %s" % (
         "源" if winner is a_path else "目标", backup, action.rel))
-    return "冲突已解决", False
+    return "冲突已解决", False, False
 
 
 def _safe_mtime(path):
@@ -374,14 +390,18 @@ def _safe_mtime(path):
 
 
 def apply_actions(actions, conflict_policy, on_ask=None, cancel_event=None):
-    # type: (List[Action], str, Optional[Any], Optional[Any]) -> Tuple[List[str], int]
-    """执行动作列表。返回 (日志行列表, 失败数)；cancel_event 置位时抛 ScanCancelled。
+    # type: (List[Action], str, Optional[Any], Optional[Any]) -> Tuple[List[str], int, Set[str]]
+    """执行动作列表。返回 (日志行列表, 失败数, 未解决冲突 rel 集合)；
+    cancel_event 置位时抛 ScanCancelled。
 
     删除动作的 from_path 记录其所属根目录，执行后在该根内清理空目录。
+    未解决冲突（skip / 备份失败 / 覆盖失败）的 rel 由调用方在重建 baseline
+    时排除，确保下次同步重新进入冲突流程，而非静默单侧覆盖。
     """
     logger = get_logger()
     logs = []
     fail = 0
+    unresolved = set()  # type: Set[str]
     for action in actions:
         if cancel_event is not None and cancel_event.is_set():
             raise ScanCancelled()
@@ -416,10 +436,13 @@ def apply_actions(actions, conflict_policy, on_ask=None, cancel_event=None):
                 logs.append("[类型冲突] %s: %s" % (action.rel, action.detail))
                 fail += 1
             elif action.kind == "conflict":
-                msg, conflict_failed = _resolve_conflict(action, conflict_policy, on_ask)
+                msg, conflict_failed, unresolved_kept = _resolve_conflict(
+                    action, conflict_policy, on_ask)
                 logs.append(msg)
                 if conflict_failed:
                     fail += 1
+                if unresolved_kept:
+                    unresolved.add(action.rel)
             elif action.kind == "extra":
                 logs.append("[保留] %s" % action.rel)
         except ScanCancelled:
@@ -428,19 +451,24 @@ def apply_actions(actions, conflict_policy, on_ask=None, cancel_event=None):
             logger.error("执行失败 %s: %s" % (action.rel, e))
             logs.append("[失败] %s: %s" % (action.rel, e))
             fail += 1
-    return logs, fail
+    return logs, fail, unresolved
 
 
 def _stat_meta(root, rel):
     # type: (str, str) -> Optional[FileMeta]
-    """取 root 下某相对路径的当前文件状态；不存在/不可访问返回 None。
+    """取 root 下某相对路径的当前文件状态；不存在/不可访问/是目录返回 None。
 
     dirty 条目在执行阶段刚被改写/删除，直接 stat 即可，无需为少量
     变更路径对整个目标树做全量重扫。
+    - follow_symlinks=False：与 scan 的"不跟随软链"策略一致；
+    - 目录返回 None：dirty 路径在执行期被外部改成目录（type_conflict 场景
+      恰会发生），构造出的 is_dir=False 条目会绕过 baseline 的目录过滤。
     """
     try:
-        st = os.stat(longpath(join_rel(root, rel)))
+        st = os.stat(longpath(join_rel(root, rel)), follow_symlinks=False)
     except OSError:
+        return None
+    if stat_mod.S_ISDIR(st.st_mode):
         return None
     return FileMeta(st.st_size, st.st_mtime)
 
@@ -465,8 +493,9 @@ def _dst_dirty_rels(actions, src_root, dst_root):
 
 
 def build_baseline_after(task, dst_root, self_paths=None, snap=None,
-                         old_baseline=None, dirty_rels=None, cancel_event=None):
-    # type: (Task, str, Optional[Any], Optional[Dict[str, FileMeta]], Optional[Dict[str, Dict[str, Any]]], Optional[Any], Optional[object]) -> Dict[str, Dict[str, Any]]
+                         old_baseline=None, dirty_rels=None, cancel_event=None,
+                         exclude_rels=None):
+    # type: (Task, str, Optional[Any], Optional[Dict[str, FileMeta]], Optional[Dict[str, Dict[str, Any]]], Optional[Any], Optional[object], Optional[Set[str]]) -> Dict[str, Dict[str, Any]]
     """同步完成后重建 baseline（双向同步两端一致）。
 
     - snap：diff 阶段的目标侧快照（可含缓存哈希），避免全量重扫重读。
@@ -474,22 +503,32 @@ def build_baseline_after(task, dst_root, self_paths=None, snap=None,
       仅对它们直接 stat 取真实状态（含删除后消失的条目），不做全量重扫。
     - old_baseline：旧 baseline；size/mtime 与快照一致的条目直接沿用其哈希
       （内容不可能变化），把全量哈希降为"仅变更文件"。
+    - exclude_rels：未解决冲突的条目**不写入**（旧的也不保留）。这样下次
+      两侧都判 added -> 重新进入冲突流程；否则 baseline 记住落败方现状后，
+      冲突会"退化"成一次无备份的单侧覆盖（静默丢数据）。
     - 目录条目（is_dir=True）不写入 baseline：目录只做创建/合并，不做内容比对，
       写入只会污染双向同步的 classify。
     - cancel_event：置位时经 scan/hash_file 抛 ScanCancelled，重建可被取消。
     """
     dirty = set(dirty_rels or set())
+    exclude = set(exclude_rels or set())
     fresh = {}  # type: Dict[str, FileMeta]
     if snap is None:
         # 无快照可用（如直接调用 apply_diff 的旧路径）：全量扫一次目标侧
         fresh = scan(dst_root, include=task.include, exclude=task.exclude,
                      self_paths=self_paths, with_hash=False,
                      cancel_event=cancel_event)
+        for rel in exclude:
+            fresh.pop(rel, None)
     else:
         for rel, meta in snap.items():
+            if rel in exclude:
+                continue
             if rel not in dirty:
                 fresh[rel] = meta
         for rel in dirty:
+            if rel in exclude:
+                continue
             m = _stat_meta(dst_root, rel)
             if m is not None:
                 fresh[rel] = m
@@ -535,8 +574,9 @@ def apply_diff(task, diff_result, conflict_policy=None, self_paths=None,
     if policy == CONFLICT_ASK and on_ask is None:
         # 无人值守（调度器）时回退默认，避免卡死
         policy = CONFLICT_NEWER
-    logs, fail = apply_actions(diff_result.actions, policy, on_ask=on_ask,
-                               cancel_event=cancel_event)
+    logs, fail, unresolved = apply_actions(diff_result.actions, policy,
+                                           on_ask=on_ask,
+                                           cancel_event=cancel_event)
     summary = diff_result.summary()
     if fail:
         summary += ", 失败 %d" % fail
@@ -549,7 +589,7 @@ def apply_diff(task, diff_result, conflict_policy=None, self_paths=None,
         task.baseline = build_baseline_after(
             task, dst_root, self_paths=self_paths,
             snap=dst_snap, old_baseline=old_bl, dirty_rels=dirty,
-            cancel_event=cancel_event)
+            cancel_event=cancel_event, exclude_rels=unresolved)
     task.last_run = now_epoch()
     task.last_summary = summary
     logger.info("任务[%s] 完成: %s" % (task.name, summary))
@@ -569,16 +609,42 @@ def perform_sync(task, logger=None, conflict_override=None, dry_run=False,
     src_root = os.path.abspath(task.source)
     dst_root = os.path.abspath(task.target)
     logger.info("开始同步任务[%s] 模式=%s 预览=%s" % (task.name, task.mode, dry_run))
+
+    def _abort(msg):
+        # type: (str) -> Dict[str, Any]
+        """中止同步：不产生任何动作、不动 baseline，任务计为失败。"""
+        logger.error("任务[%s] 已中止: %s" % (task.name, msg))
+        task.last_run = now_epoch()
+        task.last_status = "失败"
+        task.last_summary = msg
+        return {"diff": DiffResult(), "logs": ["[中止] %s" % msg],
+                "changed": False, "src_snap": {}, "dst_snap": {},
+                "fail_count": 1, "aborted": True}
+
+    # C1 防线一：源目录不可达（U 盘未插入/盘符漂移/权限被拒）时，空快照与
+    # "源真的是空目录"无法区分；继续执行会让 one_way_delete 生成对目标的
+    # 全量删除动作。目标侧不校验：目标不存在是首次同步的合法场景（copy
+    # 的 ensure_dir 会自动创建）。
+    if not os.path.isdir(longpath(src_root)):
+        return _abort("源目录不可达: %s" % src_root)
     if progress:
         progress("扫描源目录...")
+    src_errors = []  # type: List[str]
     src_snap = scan(src_root, include=task.include, exclude=task.exclude,
                     self_paths=self_paths, with_hash=False, progress=progress,
-                    cancel_event=cancel_event)
+                    cancel_event=cancel_event, error_sink=src_errors)
     if progress:
         progress("扫描目标目录...")
+    dst_errors = []  # type: List[str]
     dst_snap = scan(dst_root, include=task.include, exclude=task.exclude,
                     self_paths=self_paths, with_hash=False, progress=progress,
-                    cancel_event=cancel_event)
+                    cancel_event=cancel_event, error_sink=dst_errors)
+    # C1 防线二：任一侧扫描有错误（如子目录权限被拒）时快照不完整，diff
+    # 会把缺失条目判成 removed，配合删除传播即误删对侧。宁可失败重试。
+    scan_errors = src_errors + dst_errors
+    if scan_errors:
+        return _abort("扫描不完整(%d 处错误，如 %s)" % (
+            len(scan_errors), scan_errors[0]))
     if progress:
         progress("对比差异中...")
     result = diff(src_snap, dst_snap, task, src_root, dst_root,

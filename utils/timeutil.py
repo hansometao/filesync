@@ -75,7 +75,12 @@ def next_daily_times(times, from_epoch):
             nexts.append(tomorrow + s)
     if not nexts:
         return None
-    return min(nexts)
+    cand = min(nexts)
+    # 复检未来性：候选落在过去（非法时刻或 DST 短日边界）时顺延到下一天，
+    # 避免返回已过时刻造成调度器"完成即再触发"的连环补跑
+    while cand < from_epoch:
+        cand += 86400
+    return cand
 
 
 def prev_daily_time(times, before_epoch):
@@ -83,8 +88,9 @@ def prev_daily_time(times, before_epoch):
     """<= before_epoch 的最近一个每日触发点（今天已过的或昨天的）。
 
     用于调度器判断"停机期间是否错过了计划时刻"（补跑判定）；
-    times 为空或全部非法返回 None。DST 切换日按 86400 平移可能有 1 小时偏差，
-    仅影响补跑判定的边界，不影响正常触发。
+    times 为空或全部非法返回 None。DST 切换日按 86400 平移可能有 1 小时偏差
+    （next/prev 系列同此）：在有 DST 的时区，切换日当天的触发/补跑判定会
+    偏移 ±1h；目标用户（无 DST 时区，如中国）不受影响。
     """
     if not times:
         return None
@@ -175,9 +181,15 @@ def _hms(t):
     # type: (str) -> Optional[int]
     try:
         hh, mm = t.split(":")
-        return int(hh) * 3600 + int(mm) * 60
-    except ValueError:
+        h, m = int(hh), int(mm)
+    except (ValueError, AttributeError):
         return None
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        # 越界值（"25:00"/"-1:00"/"08:60"）按非法处理：负秒数会让
+        # next_daily_times 的次日候选落回今天，触发条件立即成立，
+        # 任务以"运行时长+60s"为周期无限连环重跑
+        return None
+    return h * 3600 + m * 60
 
 
 def unique_stamp():
