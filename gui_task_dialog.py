@@ -208,18 +208,21 @@ class TaskDialog(tk.Toplevel):
         t.name = name
         t.source = os.path.abspath(src)
         t.target = os.path.abspath(dst)
-        t.mode = self._mode.get()
+        # Combobox 显示中文标签，保存时用反向映射还原内部值
+        # （此前直接存 self._mode.get() 会把 "单向镜像" 等标签写进 Task，
+        #   同步引擎按 MODE_ONE_WAY 等内部值判断会失效）
+        t.mode = _MODE_REV.get(self._mode.get(), self._mode.get())
         t.one_way_delete = bool(self._ow_del.get()) and t.mode == MODE_ONE_WAY
         t.two_way_delete = bool(self._tw_del.get()) and t.mode == MODE_TWO_WAY
         t.enabled = bool(self._enabled.get())
         t.schedule.enabled = bool(self._sched_on.get())
-        t.schedule.type = self._sched_type.get()
+        t.schedule.type = _SCHED_REV.get(self._sched_type.get(), self._sched_type.get())
         t.schedule.interval_minutes = interval
         t.schedule.times = times
         t.schedule.weekdays = weekdays
         t.include = include
         t.exclude = exclude
-        t.conflict_policy = self._conflict.get()
+        t.conflict_policy = _POLICY_REV.get(self._conflict.get(), self._conflict.get())
         self.result = t
         self.destroy()
 

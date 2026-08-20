@@ -838,6 +838,203 @@ check(LEVEL_ERROR + " 错误" in lines24, "logger.error 写入文件")
 lg.close()
 check(lg._file is None, "logger.close: 句柄置空")
 
+# ---------- 25. GUI 对话框交互（mock 无头，不依赖 tkinter） ----------
+print("[25] GUI: TaskDialog 保存/校验/取消（mock 无头）")
+import sys as _sys
+import types as _types
+
+# 构造 fake tkinter 树注入 sys.modules，使 gui_task_dialog 可在无 tkinter 环境导入
+class _FakeEntry(object):
+    def __init__(self, text=""):
+        self._text = text
+    def get(self):
+        return self._text
+    def insert(self, *a, **k):
+        pass
+    def delete(self, *a, **k):
+        pass
+
+class _FakeVar(object):
+    def __init__(self, value=False):
+        self._value = value
+    def get(self):
+        return self._value
+    def set(self, v):
+        self._value = v
+
+class _FakeCombo(object):
+    def __init__(self, value=""):
+        self._value = value
+    def get(self):
+        return self._value
+    def set(self, v):
+        self._value = v
+
+class _FakeWidget(object):
+    def __init__(self, *a, **k):
+        pass
+    def configure(self, *a, **k):
+        pass
+    def grid(self, *a, **k):
+        pass
+    def pack(self, *a, **k):
+        pass
+    def bind(self, *a, **k):
+        pass
+
+class _FakeToplevel(_FakeWidget):
+    def __init__(self, *a, **k):
+        self.destroyed = False
+    def title(self, *a, **k):
+        pass
+    def geometry(self, *a, **k):
+        pass
+    def minsize(self, *a, **k):
+        pass
+    def transient(self, *a, **k):
+        pass
+    def grab_set(self):
+        pass
+    def protocol(self, *a, **k):
+        pass
+    def destroy(self):
+        self.destroyed = True
+
+_fake_tk = _types.ModuleType("tkinter")
+_fake_tk.Toplevel = _FakeToplevel
+_fake_tk.W = "w"
+_fake_tk.END = "end"
+_fake_tk.DISABLED = "disabled"
+_fake_tk.NORMAL = "normal"
+_fake_tk.BOTH = "both"
+_fake_ttk = _types.ModuleType("tkinter.ttk")
+for _n in ("Entry", "Combobox", "Checkbutton", "Spinbox", "Label", "Frame", "Button"):
+    setattr(_fake_ttk, _n, _FakeWidget)
+_fake_tk.ttk = _fake_ttk
+_fake_fd = _types.ModuleType("tkinter.filedialog")
+_fake_fd.askdirectory = lambda: "/tmp"
+_fake_tk.filedialog = _fake_fd
+_err_box_calls = []
+def _fake_showerror(*a, **k):
+    _err_box_calls.append(a)
+_fake_mb = _types.ModuleType("tkinter.messagebox")
+_fake_mb.showerror = _fake_showerror
+_fake_tk.messagebox = _fake_mb
+_sys.modules["tkinter"] = _fake_tk
+_sys.modules["tkinter.ttk"] = _fake_ttk
+_sys.modules["tkinter.filedialog"] = _fake_fd
+_sys.modules["tkinter.messagebox"] = _fake_mb
+
+from gui_task_dialog import TaskDialog as _TD
+from gui_task_dialog import _MODE_LABELS as _ML, _SCHED_LABELS as _SL, _POLICY_LABELS as _PL
+from config import SCHED_INTERVAL as _SI, SCHED_DAILY as _SD, CONFLICT_NEWER as _CN
+
+d25 = tempfile.mkdtemp()
+src25 = os.path.join(d25, "src")
+dst25 = os.path.join(d25, "dst")
+os.makedirs(src25)
+os.makedirs(dst25)
+
+def _mk_dialog(one_way=True):
+    d = _TD.__new__(_TD)  # 绕过 __init__（真实控件构造），手动装配
+    d.is_new = True
+    d.task = None
+    d.store = None
+    d.result = None
+    d._name = _FakeEntry("任务A")
+    d._src = _FakeEntry(src25)
+    d._dst = _FakeEntry(dst25)
+    d._mode = _FakeCombo(_ML[MODE_ONE_WAY if one_way else MODE_TWO_WAY])
+    d._ow_del = _FakeVar(True)
+    d._tw_del = _FakeVar(False)
+    d._enabled = _FakeVar(True)
+    d._sched_on = _FakeVar(False)
+    d._sched_type = _FakeCombo(_SL[_SI])
+    d._interval = _FakeEntry("60")
+    d._times = _FakeEntry("08:00")
+    d._weekdays = _FakeEntry("1,3,5")
+    d._include = _FakeEntry("")
+    d._exclude = _FakeEntry("*.tmp")
+    d._conflict = _FakeCombo(_PL[_CN])
+    return d
+
+# 校验拦截分支
+_err_box_calls[:] = []
+d = _mk_dialog()
+d._name = _FakeEntry("   ")
+d._on_save()
+check(len(_err_box_calls) == 1 and d.result is None, "保存: 空名称被拦截(弹窗且不保存)")
+
+_err_box_calls[:] = []
+d = _mk_dialog()
+d._src = _FakeEntry("")
+d._on_save()
+check(len(_err_box_calls) == 1 and d.result is None, "保存: 缺源目录被拦截")
+
+_err_box_calls[:] = []
+d = _mk_dialog()
+d._src = _FakeEntry(os.path.join(d25, "nonexistent"))
+d._on_save()
+check(len(_err_box_calls) == 1 and d.result is None, "保存: 源目录不存在被拦截")
+
+_err_box_calls[:] = []
+d = _mk_dialog()
+d._src = _FakeEntry(src25)
+d._dst = _FakeEntry(src25)
+d._on_save()
+check(len(_err_box_calls) == 1 and d.result is None, "保存: 源=目标被拦截")
+
+_err_box_calls[:] = []
+d = _mk_dialog()
+d._dst = _FakeEntry(os.path.join(src25, "sub"))
+d._on_save()
+check(len(_err_box_calls) == 1 and d.result is None, "保存: 互为子目录被拦截")
+
+_err_box_calls[:] = []
+d = _mk_dialog()
+d._sched_on = _FakeVar(True)
+d._sched_type = _FakeCombo(_SL[_SD])
+d._times = _FakeEntry("25:99")
+d._on_save()
+check(len(_err_box_calls) == 1 and d.result is None, "保存: 非法调度时刻被拦截")
+
+# 合法保存：字段正确（含反向映射修复）
+_err_box_calls[:] = []
+d = _mk_dialog()
+d._on_save()
+check(d.result is not None and _err_box_calls == [], "保存: 合法输入生成 Task")
+check(d.result.name == "任务A", "保存: name 正确")
+check(d.result.source == os.path.abspath(src25) and d.result.target == os.path.abspath(dst25),
+      "保存: 路径转为绝对路径")
+check(d.result.mode == MODE_ONE_WAY, "保存: mode 存内部值(非中文标签)")
+check(d.result.schedule.type == _SI and d.result.schedule.interval_minutes == 60,
+      "保存: 调度类型/间隔正确")
+check(d.result.conflict_policy == _CN, "保存: 冲突策略存内部值")
+check(d.result.exclude == ["*.tmp"], "保存: 排除规则解析为列表")
+check(d.result.one_way_delete is True and d.result.two_way_delete is False,
+      "保存: 单向删除勾选映射")
+
+# 双向模式：two_way_delete 生效、one_way_delete 强制关闭
+d = _mk_dialog(one_way=False)
+d._tw_del = _FakeVar(True)
+d._on_save()
+check(d.result.mode == MODE_TWO_WAY, "保存: 双向 mode 正确")
+check(d.result.two_way_delete is True and d.result.one_way_delete is False,
+      "保存: 双向传播删除勾选映射")
+
+# 编辑模式：复用既有 task 对象
+t25 = Task()
+d = _mk_dialog()
+d.is_new = False
+d.task = t25
+d._on_save()
+check(d.result is t25, "保存: 编辑模式复用原 Task 对象")
+
+# 取消
+d = _mk_dialog()
+d._on_cancel()
+check(d.result is None and d.destroyed, "取消: result 置 None 且关闭对话框")
+
 # ---------- 清理 ----------
 print("\n结果：%s" % ("全部通过" if not failures else "%d 项失败" % len(failures)))
 if failures:

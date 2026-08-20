@@ -483,6 +483,7 @@ class App(object):
 
     # ---------- 杂项 ----------
     def _open_logs(self):
+        # type: () -> None
         d = LOG_DIR
         if sys.platform == "win32":
             os.startfile(d)  # type: ignore
