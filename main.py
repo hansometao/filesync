@@ -5,6 +5,7 @@
 
 用法：
   python main.py                 # 启动图形界面
+  python main.py --autostart     # 开机自启入口：以后台运行形态启动（不弹主窗口）
   python main.py --list          # 列出全部任务（无头）
   python main.py --sync <名称或ID>  # 立即执行一次指定任务（无头，可配合
                                 # Windows 任务计划程序 / cron 做无人值守备份）
@@ -35,6 +36,7 @@ _HELP = """文件夹同步备份工具
 
 用法:
   python main.py                 启动图形界面
+  python main.py --autostart     开机自启入口：以后台运行形态启动（不弹主窗口）
   python main.py --list          列出全部任务（无头）
   python main.py --sync <名称或ID>   立即执行一次指定任务（无头）
   python main.py --help          显示本帮助
@@ -150,6 +152,7 @@ def run_cli(argv, app_dir=None):
 def main():
     # type: () -> None
     argv = sys.argv[1:]
+    autostart = bool(argv) and argv[0] == "--autostart"
     if argv and argv[0] in ("--list", "--sync", "--help", "-h"):
         popup = _is_windowed_frozen()
         if argv[0] in ("--help", "-h"):
@@ -178,7 +181,7 @@ def main():
     except Exception:
         pass
 
-    app = App(root)
+    app = App(root, autostart=autostart)
     root.protocol("WM_DELETE_WINDOW", app.on_close)
     root.mainloop()
 

@@ -1554,6 +1554,60 @@ d.store = None
 d._on_save()
 check(d.result is not None and _err_box_calls == [], "查重: store 缺失时跳过查重不崩溃")
 
+# ---------- 33. 托盘 / 开机自启（tray / autostart） ----------
+print("[33] 托盘与开机自启")
+import tray as _tray
+import autostart as _autostart
+
+check(_tray.is_supported() == (sys.platform == "win32"),
+      "tray.is_supported 与平台一致")
+
+# 托盘图标本体仅 Windows 可创建；非 Windows 必须优雅抛 OSError（降级路径）
+if sys.platform != "win32":
+    try:
+        _tray.TrayIcon("t", [], lambda x: None)
+        check(False, "非 Windows 创建托盘应抛 OSError")
+    except OSError:
+        check(True, "非 Windows 创建托盘优雅抛 OSError")
+    except Exception as e:
+        check(False, "非 Windows 托盘异常类型: %s" % e)
+
+check(_autostart.is_supported() == (sys.platform in ("win32", "linux", "darwin")),
+      "autostart.is_supported 与平台一致")
+
+cmd = _autostart.build_command()
+check(cmd.endswith("--autostart"), "自启命令行含 --autostart")
+check(sys.executable in cmd, "自启命令行含解释器/exe 路径")
+args = _autostart._program_args()
+check(args[-1] == "--autostart", "ProgramArguments 末位为 --autostart")
+
+# Linux .desktop 与 macOS plist 为纯文件逻辑：注入 home 跨平台可测
+home = tempfile.mkdtemp()
+check(_autostart._linux_enable(home, "/opt/app --autostart"),
+      "Linux .desktop 写入成功")
+p = _autostart._linux_path(home)
+check(os.path.isfile(p) and _autostart._linux_is_enabled(home),
+      "Linux 自启文件生成且状态为已启用")
+with open(p, encoding="utf-8") as f:
+    content = f.read()
+check("[Desktop Entry]" in content and "--autostart" in content,
+      "Linux .desktop 内容正确")
+check(_autostart._linux_disable(home) and not _autostart._linux_is_enabled(home),
+      "Linux 反注册删除文件")
+
+home2 = tempfile.mkdtemp()
+check(_autostart._mac_enable(home2, ["/opt/app", "--autostart"]),
+      "macOS plist 写入成功")
+check(_autostart._mac_is_enabled(home2), "macOS 自启文件生成且状态为已启用")
+check(_autostart._mac_disable(home2) and not _autostart._mac_is_enabled(home2),
+      "macOS 反注册删除文件")
+
+# Windows 注册表分支在非 Windows 上必须优雅失败（不崩溃、不误报）
+if sys.platform != "win32":
+    check(not _autostart._win_enable("x"), "非 Windows 注册自启返回 False")
+    check(not _autostart._win_disable(), "非 Windows 反注册返回 False")
+    check(not _autostart._win_is_enabled(), "非 Windows 查询自启返回 False")
+
 # ---------- 清理 ----------
 print("\n结果：%s" % ("全部通过" if not failures else "%d 项失败" % len(failures)))
 if failures:

@@ -27,6 +27,8 @@ from scanner import ScanCancelled
 from logger import init_logger
 from utils.paths import longpath, app_dir
 from utils.timeutil import format_epoch
+import autostart
+import tray as tray_mod
 
 APP_DIR = app_dir()
 LOG_DIR = os.path.join(APP_DIR, "logs")
@@ -36,8 +38,8 @@ _MODE_LABEL = {MODE_ONE_WAY: "单向镜像", MODE_TWO_WAY: "双向同步"}
 
 
 class App(object):
-    def __init__(self, root):
-        # type: (tk.Tk) -> None
+    def __init__(self, root, autostart=False):
+        # type: (tk.Tk, bool) -> None
         self.root = root
         self.logger = init_logger(LOG_DIR, quiet=True)  # GUI 模式抑制控制台打印
         self.store = TaskStore(CONFIG_PATH)
@@ -70,6 +72,10 @@ class App(object):
         # 干扰（后者 clear 掉前者的取消标志 / 销毁前者的等待窗）。
         # 运行槽只防同一任务并发，这里补跨任务互斥
         self._manual_busy = False
+        # 最小化后台运行 / 托盘相关状态
+        self._tray = None            # type: Optional[tray_mod.TrayIcon]
+        self._tray_hidden = False    # 已隐藏到托盘（防止 withdraw 触发 <Unmap> 死循环）
+        self._quitting = False       # 真正退出标志（托盘菜单/菜单栏"退出"置位）
 
         self._build_ui()
         self.logger.add_callback(self._on_log)
@@ -77,6 +83,15 @@ class App(object):
         self._load_log_history()
         self._refresh_tasks(full=True)
         self._maybe_autostart()
+        # 最小化后台运行：菜单栏（全平台）+ 托盘图标（仅 Windows 可用）
+        self._build_menu()
+        if tray_mod.is_supported():
+            self._init_tray()
+            # Windows 最小化（-）→ 隐藏到托盘（任务栏不留入口）
+            self.root.bind("<Unmap>", self._on_unmap)
+        # 开机自启入口：以后台运行形态启动（不弹主窗口）
+        if autostart:
+            self.root.after(200, self._hide_to_background)
         self._drain_id = self.root.after(100, self._drain_ui_queue)
         self._tick_id = self.root.after(1000, self._tick)
 
@@ -594,8 +609,142 @@ class App(object):
         except tk.TclError:
             pass
 
+    # ---------- 菜单栏 / 托盘 / 最小化后台运行 ----------
+    def _build_menu(self):
+        # type: () -> None
+        """菜单栏「文件」：最小化到后台 / 开机自启 / 退出（全平台可用）。"""
+        menubar = tk.Menu(self.root)
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="最小化到后台", command=self._hide_to_background)
+        self._autostart_var = tk.BooleanVar(value=autostart.is_enabled())
+        file_menu.add_checkbutton(label="开机自启", variable=self._autostart_var,
+                                  command=self._toggle_autostart)
+        file_menu.add_separator()
+        file_menu.add_command(label="退出", command=self._request_quit)
+        menubar.add_cascade(label="文件", menu=file_menu)
+        self.root.config(menu=menubar)
+
+    def _toggle_autostart(self):
+        # type: () -> None
+        # 菜单栏勾选项：勾选即注册、取消即反注册；失败回滚勾选并提示
+        want = self._autostart_var.get()
+        ok = autostart.enable() if want else autostart.disable()
+        if not ok:
+            self._autostart_var.set(not want)
+            messagebox.showerror("错误", "设置开机自启失败，请检查权限或手动配置")
+            return
+        self.logger.info("开机自启已%s" % ("启用" if want else "关闭"))
+
+    def _init_tray(self):
+        # type: () -> None
+        """创建托盘图标（失败不致命：降级为任务栏最小化）。"""
+        try:
+            self._tray = tray_mod.TrayIcon(
+                "文件夹同步备份工具",
+                menu=[(1, "显示主窗口"), (2, "退出")],
+                on_menu=self._on_tray_menu,
+                on_activate=self._restore_from_tray,
+                icon_path=os.path.join(APP_DIR, "app.ico"),
+                main_hwnd=self.root.winfo_id())  # 主窗口句柄，托盘菜单关闭后还焦点
+        except Exception as e:
+            self._tray = None
+            self.logger.warn("托盘图标创建失败（降级为任务栏最小化）: %s" % e)
+
+    def _on_tray_menu(self, item_id):
+        # type: (int) -> None
+        # 托盘回调在 Windows 消息泵（主线程）中执行，可直接调 tkinter
+        if item_id == 1:
+            self._restore_from_tray()
+        elif item_id == 2:
+            self._request_quit()
+
+    def _hide_to_background(self):
+        # type: () -> None
+        """最小化后台运行：Windows 隐藏到托盘；非 Windows 最小化到任务栏。
+
+        只隐藏窗口，**不**停止调度器、不退出进程——后台继续按计划同步。
+        """
+        if self._closing:
+            return
+        if self._tray is not None:
+            self._tray_hidden = True
+            try:
+                self.root.withdraw()
+            except tk.TclError:
+                self._tray_hidden = False
+        else:
+            # 非 Windows 无托盘：弹确认框告知后台运行状态与退出路径
+            self._ask_minimize_or_quit()
+
+    def _ask_minimize_or_quit(self):
+        # type: () -> None
+        """非 Windows 平台：点 X 后弹三选一对话框，明确退出路径。
+
+        - 最小化到后台（默认）：iconify，调度器照常
+        - 退出程序：置位后走完整关闭流程
+        - 取消：保持窗口前台
+        """
+        if self._closing:
+            return
+        try:
+            ans = messagebox.askyesnocancel(
+                "最小化到后台",
+                "点关闭按钮不会退出程序，而是最小化到后台继续运行。\n\n"
+                "• 任务栏图标可恢复窗口\n"
+                "• 后台期间调度器照常工作\n"
+                "• 恢复窗口后从菜单栏「文件→退出」真正退出\n\n"
+                "最小化到后台？（选「否」直接退出程序，选「取消」保持窗口）",
+                icon="question",
+                default="yes")
+        except tk.TclError:
+            return
+        if ans is True:                 # Yes → 最小化到后台
+            try:
+                self.root.iconify()
+            except tk.TclError:
+                pass
+        elif ans is False:              # No → 退出程序
+            self._request_quit()
+        # None（Cancel）→ 保持窗口前台，什么都不做
+
+    def _restore_from_tray(self):
+        # type: () -> None
+        """从托盘恢复主窗口（左键单击 / 菜单"显示主窗口"）。"""
+        self._tray_hidden = False
+        try:
+            self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+        except tk.TclError:
+            pass
+        self._refresh_tasks(full=True)
+
+    def _request_quit(self):
+        # type: () -> None
+        """真正退出（托盘菜单/菜单栏"退出"）：置位后走完整关闭流程。"""
+        self._quitting = True
+        self.on_close()
+
+    def _on_unmap(self, event):
+        # type: (object) -> None
+        # Windows 最小化（-）时触发 <Unmap>：隐藏到托盘。
+        # 需判 state()=="iconic"：withdraw 也会触发 <Unmap>，但状态为
+        # withdrawn，且 _tray_hidden 已置位防重入。
+        if self._closing or self._tray is None or self._tray_hidden:
+            return
+        try:
+            if self.root.state() == "iconic":
+                self._hide_to_background()
+        except tk.TclError:
+            pass
+
     def on_close(self):
         # type: () -> None
+        """窗口关闭按钮（X）：未置退出标志时转后台运行，否则完整关闭。"""
+        if not self._quitting:
+            # X 关闭 → 最小化后台运行（Windows 托盘 / 非 Windows 任务栏）
+            self._hide_to_background()
+            return
         if self._closing:
             return
         self._closing = True
@@ -631,6 +780,13 @@ class App(object):
             self.logger.close()
         except Exception:
             pass
+        # 退出前移除托盘图标（NIM_DELETE），避免残留幽灵图标
+        if self._tray is not None:
+            try:
+                self._tray.destroy()
+            except Exception:
+                pass
+            self._tray = None
         try:
             self.root.destroy()
         except tk.TclError:

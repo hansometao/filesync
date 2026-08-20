@@ -31,6 +31,11 @@
 - 日志审计：每次运行记录动作明细，GUI 可查看，文件留存于 `logs/`（超过 2MB 自动轮转，保留最近 1 份历史）
 - 调度兜底：停机期间错过的周期在下次启动时**补跑一次**；到点时任务恰在运行则**自动顺延 60 秒**重试，
   绝不静默丢弃；补跑/触发后下次周期从**触发时刻**重新起算，不会因旧锚点造成连续重复触发
+- 最小化后台运行：点关闭（X）不再退出——Windows 隐藏到**系统托盘**（纯 ctypes 实现，零第三方依赖，
+  左键恢复、右键菜单「显示主窗口/退出」），非 Windows 最小化到任务栏（可见可恢复）；
+  调度器与后台同步**照常运行**；最小化按钮在 Windows 上同样隐藏到托盘
+- 开机自启：菜单栏「文件 → 开机自启」勾选即注册（Windows 注册表 Run 键 / Linux XDG autostart /
+  macOS LaunchAgent），取消即反注册；自启以 `--autostart` 标志启动，**直接进入后台运行**不弹主窗口
 
 ---
 
@@ -57,9 +62,10 @@ python3 main.py
 
 ### 命令行无头模式（配合任务计划程序 / cron 无人值守）
 ```
-python main.py --list            # 列出全部任务（ID / 名称 / 启用状态 / 方向）
+python main.py --autostart     # 开机自启入口：以后台运行形态启动（不弹主窗口）
+python main.py --list          # 列出全部任务（ID / 名称 / 启用状态 / 方向）
 python main.py --sync <名称或ID>  # 立即执行一次指定任务
-python main.py --help            # 显示帮助
+python main.py --help          # 显示帮助
 ```
 - `--sync` 退出码：`0` 成功；`1` 任务未找到或已禁用；`2` 部分文件失败（摘要中含失败数）；`3` 同步过程异常（业务错误已捕获并落盘为"失败"状态）。
 - 任务请先用 GUI 创建，`--sync` 按名称或 ID 匹配（ID 可用 `--list` 查看）。
@@ -128,6 +134,16 @@ python main.py --help            # 显示帮助
 5. 底部日志面板实时显示运行记录
 6. 关闭窗口时若有任务正在运行，会**有界等待（最多 5 秒）**其结束后再干净退出
 
+### 最小化后台运行 / 开机自启
+- **点 X 不再退出**：关闭按钮（X）改为转入后台运行——Windows 隐藏到系统托盘
+  （左键单击恢复窗口，右键菜单「显示主窗口 / 退出」）；非 Windows 最小化到任务栏。
+  后台期间调度器照常工作，**真正退出**走菜单栏「文件 → 退出」或托盘右键「退出」。
+- **最小化按钮**：Windows 上最小化（-）同样隐藏到托盘；非 Windows 保持原生任务栏最小化。
+- **开机自启**：菜单栏「文件 → 开机自启」勾选即注册（Windows 注册表 / Linux XDG autostart /
+  macOS LaunchAgent），取消即反注册；开机自启以 `--autostart` 进入后台运行，不弹主窗口。
+- **降级**：托盘仅 Windows 可用（纯 ctypes）；非 Windows 上 X 退化为最小化到任务栏，
+  恢复/退出均通过窗口与菜单栏完成。
+
 ### 配置文件
 - 任务配置持久化在 `config/tasks.json`，可手动备份；
 - 双向同步的上次快照（baseline）单独存放在 `config/baseline/<任务ID>.json`——
@@ -147,6 +163,8 @@ folder_sync/
   sync_engine.py     # 差异对比 + 执行 + 冲突处理
   scheduler.py       # 内置常驻调度器
   logger.py          # 日志（UTF-8 + GUI 回调）
+  tray.py            # Windows 系统托盘（纯 ctypes，非 Windows 优雅降级）
+  autostart.py       # 开机自启注册（注册表 / XDG autostart / LaunchAgent）
   utils/             # 路径(长路径兼容) / 时间(mtime 容差)
   gui_app.py         # 主窗口
   gui_task_dialog.py # 新增/编辑任务
@@ -204,4 +222,6 @@ python test_sync.py
 include 过滤下空目录不传播、baseline 分离存储与旧格式自动迁移、部分失败状态上报、
 数据安全回归（源目录不可达/扫描不完整时中止而非误删目标、skip 冲突不固化进 baseline）、
 持久层字段清洗、任务名查重、logger 回调投递与超限轮转、
-CLI 无头入口（--list / --sync 退出码 0/1/2/3 与异常状态落盘）。
+CLI 无头入口（--list / --sync 退出码 0/1/2/3 与异常状态落盘）、
+托盘/自启平台判定与降级（非 Windows 创建托盘优雅报错、自启命令生成、
+Linux/macOS 注册文件读写与反注册、Windows 分支在非 Windows 上优雅失败）。
