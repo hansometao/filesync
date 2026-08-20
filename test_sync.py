@@ -1608,6 +1608,85 @@ if sys.platform != "win32":
     check(not _autostart._win_disable(), "非 Windows 反注册返回 False")
     check(not _autostart._win_is_enabled(), "非 Windows 查询自启返回 False")
 
+# ---------- 34. fast 比较模式（FAT32 mtime 容差内免哈希） ----------
+print("[34] fast 比较模式: FAT32 容差内免哈希判同")
+
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src")
+dst = os.path.join(d, "dst")
+os.makedirs(src)
+os.makedirs(dst)
+T34 = 1700000000.0
+write(os.path.join(src, "a.txt"), "hello", mtime=T34)
+write(os.path.join(dst, "a.txt"), "hello", mtime=T34 + 1)  # FAT32 2s 粒度截断
+
+_hash_calls = [0]
+_orig_hash34 = _sync_engine.hash_file
+
+
+def _counting_hash34(path, chunk=1 << 20, cancel_event=None):
+    # type: (str, int, Optional[Any]) -> Optional[str]
+    _hash_calls[0] += 1
+    return _orig_hash34(path, chunk=chunk, cancel_event=cancel_event)
+
+
+_sync_engine.hash_file = _counting_hash34
+try:
+    t = fresh_task(MODE_ONE_WAY, src, dst)
+    t.compare = "fast"
+    res = perform_sync(t, dry_run=True)
+    check(res["diff"].copy_count == 0 and _hash_calls[0] == 0,
+          "fast: 容差内 mtime 微差免哈希判同(零哈希读盘)")
+
+    _hash_calls[0] = 0
+    t2 = fresh_task(MODE_ONE_WAY, src, dst)
+    t2.compare = "auto"
+    res2 = perform_sync(t2, dry_run=True)
+    check(res2["diff"].copy_count == 0 and _hash_calls[0] > 0,
+          "auto: 同场景哈希确认内容相同(不复制但读盘)")
+finally:
+    _sync_engine.hash_file = _orig_hash34
+
+# fast 的安全网：超出容差的 mtime 差 / size 变化仍必须检出
+write(os.path.join(src, "b.txt"), "new", mtime=T34)
+write(os.path.join(dst, "b.txt"), "old", mtime=T34 - 10)      # Δmtime 超容差
+write(os.path.join(src, "c.txt"), "xyz", mtime=T34)
+write(os.path.join(dst, "c.txt"), "abcdef", mtime=T34 + 1)    # size 不同
+t3 = fresh_task(MODE_ONE_WAY, src, dst)
+t3.compare = "fast"
+res3 = perform_sync(t3, dry_run=True)
+rels3 = {a.rel for a in res3["diff"].actions}
+check("b.txt" in rels3 and "c.txt" in rels3,
+      "fast: 超容差/尺寸变化仍被检出(安全网不受影响)")
+
+# fast 双向：baseline mtime 容差内微差（FAT32 截断）判 same，免哈希
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src")
+dst = os.path.join(d, "dst")
+os.makedirs(src)
+os.makedirs(dst)
+write(os.path.join(src, "a.txt"), "hello")
+t4 = fresh_task(MODE_TWO_WAY, src, dst)
+t4.compare = "fast"
+perform_sync(t4)  # 首次同步建立 baseline
+f34 = os.path.join(dst, "a.txt")
+st34 = os.stat(f34)
+os.utime(f34, (st34.st_atime, st34.st_mtime + 1))  # 模拟 FAT32 截断(<2s)
+
+
+def _boom_hash34(path, chunk=1 << 20, cancel_event=None):
+    # type: (str, int, Optional[Any]) -> Optional[str]
+    raise AssertionError("fast 模式不应读哈希: %s" % path)
+
+
+_sync_engine.hash_file = _boom_hash34
+try:
+    res4 = perform_sync(t4, dry_run=True)
+    check(res4["diff"].is_empty(),
+          "fast: baseline 容差内微差免哈希判 same(双向)")
+finally:
+    _sync_engine.hash_file = _orig_hash34
+
 # ---------- 清理 ----------
 print("\n结果：%s" % ("全部通过" if not failures else "%d 项失败" % len(failures)))
 if failures:

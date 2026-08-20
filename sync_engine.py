@@ -28,9 +28,12 @@ import stat as stat_mod
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from utils.paths import longpath, join_rel, ensure_dir
-from utils.timeutil import is_newer, now_epoch, unique_stamp
+from utils.timeutil import is_newer, now_epoch, unique_stamp, MTIME_TOLERANCE
 from scanner import scan, hash_file, FileMeta, ScanCancelled
-from config import Task, MODE_ONE_WAY, MODE_TWO_WAY, CONFLICT_NEWER, CONFLICT_ASK
+from config import (
+    Task, MODE_ONE_WAY, MODE_TWO_WAY,
+    CONFLICT_NEWER, CONFLICT_ASK, CONFLICT_SOURCE, CONFLICT_TARGET, CONFLICT_SKIP,
+)
 from logger import get_logger
 
 
@@ -106,16 +109,22 @@ class DiffResult(object):
         return "，".join(parts) if parts else "无差异"
 
 
-def _content_differs(a, b, a_path, b_path, cancel_event=None):
-    # type: (FileMeta, FileMeta, str, str, Optional[Any]) -> bool
+def _content_differs(a, b, a_path, b_path, cancel_event=None, tolerant=False):
+    # type: (FileMeta, FileMeta, str, str, Optional[Any], bool) -> bool
     """size 不同即判不同；size 相同且 mtime 完全相等视为相同（copy2 保留 mtime）。
 
     size 相同但 mtime 有差异（含 FAT32 2 秒粒度、<2 秒快速编辑的微差）时，
     用内容哈希确认，避免漏同步。cancel_event 置位时经 hash_file 抛 ScanCancelled。
+    tolerant=True（task.compare="fast"）：|Δmtime| 在 FAT32 容差内且 size 相同
+    直接判相同，跳过双侧哈希读盘——代价是 2 秒内连续两次编辑可能漏判一次，
+    换取大目录在 FAT32 目标（mtime 被 copy2 截断到 2 秒粒度）上每轮
+    全量重哈希的开销。
     """
     if a.size != b.size:
         return True
     if a.mtime == b.mtime:
+        return False
+    if tolerant and abs(a.mtime - b.mtime) <= MTIME_TOLERANCE:
         return False
     if a.hash is None:
         a.hash = hash_file(a_path, cancel_event=cancel_event)
@@ -127,8 +136,8 @@ def _content_differs(a, b, a_path, b_path, cancel_event=None):
     return a.hash != b.hash
 
 
-def _classify(snap, rel, baseline, root=None, cancel_event=None):
-    # type: (Dict[str, FileMeta], str, Dict[str, Dict[str, Any]], Optional[str], Optional[object]) -> str
+def _classify(snap, rel, baseline, root=None, cancel_event=None, tolerant=False):
+    # type: (Dict[str, FileMeta], str, Dict[str, Dict[str, Any]], Optional[str], Optional[object], bool) -> str
     bl = baseline.get(rel)
     if rel not in snap:
         return "removed" if bl is not None else "absent"
@@ -137,7 +146,12 @@ def _classify(snap, rel, baseline, root=None, cancel_event=None):
         return "added"
     if cur.size != bl.get("size"):
         return "modified"
-    if cur.mtime == bl.get("mtime"):
+    bl_mtime = bl.get("mtime")
+    if cur.mtime == bl_mtime:
+        return "same"
+    if (tolerant and isinstance(bl_mtime, (int, float))
+            and abs(cur.mtime - bl_mtime) <= MTIME_TOLERANCE):
+        # fast 模式：size 相同且 mtime 差在 FAT32 容差内，免哈希判 same
         return "same"
     # mtime 微差：用内容哈希兜底，避免 FAT32(2s 精度) / NTFS 快速编辑被容差误判为未改
     bh = bl.get("hash")
@@ -164,6 +178,8 @@ def diff(src_snap, dst_snap, task, src_root, dst_root, baseline=None,
     result = DiffResult()
     if baseline is None:
         baseline = task.baseline
+    # fast 比较模式（task.compare="fast"）：mtime 容差内免哈希（见 _content_differs）
+    tolerant = getattr(task, "compare", "auto") == "fast"
 
     if task.mode == MODE_ONE_WAY:
         for rel in sorted(set(src_snap) | set(dst_snap)):
@@ -195,7 +211,7 @@ def diff(src_snap, dst_snap, task, src_root, dst_root, baseline=None,
                 result.add(Action("copy", rel, "新增", sp, dp))
             elif in_src and in_dst:
                 if _content_differs(src_snap[rel], dst_snap[rel], sp, dp,
-                                    cancel_event=cancel_event):
+                                    cancel_event=cancel_event, tolerant=tolerant):
                     result.add(Action("copy", rel, "修改", sp, dp))
             elif not in_src and in_dst:
                 if task.one_way_delete:
@@ -223,23 +239,26 @@ def diff(src_snap, dst_snap, task, src_root, dst_root, baseline=None,
             elif in_dst and not in_src:
                 result.add(Action("mkdir", rel, "B->A 创建目录", None, sp))
             continue
-        sa = _classify(src_snap, rel, baseline, src_root, cancel_event=cancel_event)
-        sb = _classify(dst_snap, rel, baseline, dst_root, cancel_event=cancel_event)
+        sa = _classify(src_snap, rel, baseline, src_root,
+                       cancel_event=cancel_event, tolerant=tolerant)
+        sb = _classify(dst_snap, rel, baseline, dst_root,
+                       cancel_event=cancel_event, tolerant=tolerant)
         for act in _reconcile_two(rel, sa, sb, src_snap, dst_snap, sp, dp, task,
-                                  src_root, dst_root, cancel_event=cancel_event):
+                                  src_root, dst_root, cancel_event=cancel_event,
+                                  tolerant=tolerant):
             result.add(act)
     return result
 
 
 def _reconcile_two(rel, sa, sb, src_snap, dst_snap, sp, dp, task, src_root, dst_root,
-                   cancel_event=None):
-    # type: (str, str, str, Dict[str, FileMeta], Dict[str, FileMeta], str, str, Task, str, str, Optional[object]) -> List[Action]
+                   cancel_event=None, tolerant=False):
+    # type: (str, str, str, Dict[str, FileMeta], Dict[str, FileMeta], str, str, Task, str, str, Optional[object], bool) -> List[Action]
     copy_a = Action("copy", rel, "A->B 同步", sp, dp)   # 源 -> 目标
     copy_b = Action("copy", rel, "B->A 同步", dp, sp)   # 目标 -> 源
 
     if sa == "added" and sb == "added":
         if _content_differs(src_snap[rel], dst_snap[rel], sp, dp,
-                            cancel_event=cancel_event):
+                            cancel_event=cancel_event, tolerant=tolerant):
             return [Action("conflict", rel, "两侧均新增且内容不同", sp, dp, True)]
         return []
     if sa == "added":
@@ -248,7 +267,7 @@ def _reconcile_two(rel, sa, sb, src_snap, dst_snap, sp, dp, task, src_root, dst_
         return [copy_b]
     if sa == "modified" and sb == "modified":
         if _content_differs(src_snap[rel], dst_snap[rel], sp, dp,
-                            cancel_event=cancel_event):
+                            cancel_event=cancel_event, tolerant=tolerant):
             return [Action("conflict", rel, "两侧均修改且内容不同", sp, dp, True)]
         return []
     if sa == "modified":
@@ -270,9 +289,14 @@ def _reconcile_two(rel, sa, sb, src_snap, dst_snap, sp, dp, task, src_root, dst_
 
 def _do_copy(from_path, to_path):
     # type: (str, str) -> None
-    """原子复制：先写临时文件再替换，进程中途被杀不会留下半截目标文件。"""
+    """原子复制：先写临时文件再替换，进程中途被杀不会留下半截目标文件。
+
+    tmp 名带进程号：调度器允许不同任务并行，两个任务写同一目标文件时
+    固定名 tmp 会互踩产生交叉损坏；后缀保持 .tmp~ 与 scanner 的排除
+    规则（endswith(".tmp~")）兼容。
+    """
     ensure_dir(os.path.dirname(to_path))
-    tmp = to_path + ".tmp~"
+    tmp = "%s.%d.tmp~" % (to_path, os.getpid())
     try:
         shutil.copy2(longpath(from_path), longpath(tmp))
         os.replace(longpath(tmp), longpath(to_path))
@@ -338,7 +362,8 @@ def _resolve_conflict(action, policy, on_ask=None):
             got = on_ask(action)
         except Exception:
             got = None
-        policy = got if got in ("newer_wins", "source_wins", "target_wins", "skip") else "skip"
+        valid = (CONFLICT_NEWER, CONFLICT_SOURCE, CONFLICT_TARGET, CONFLICT_SKIP)
+        policy = got if got in valid else CONFLICT_SKIP
     if policy == "skip":
         logger.warn("冲突未处理(跳过): %s" % action.rel)
         return "跳过冲突", False, True
