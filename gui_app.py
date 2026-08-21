@@ -337,6 +337,20 @@ class App(object):
             n = self._prog_count
             self._ui_put(lambda: self._set_wait_progress("已扫描 %d 项：%s" % (n, short)))
 
+    def _popup_if_alive(self, kind, title, msg):
+        # type: (str, str, str) -> None
+        """主线程弹窗（经 UI 队列投递执行）：退出流程中不弹模态框。
+
+        worker 尾部的 messagebox 若不检查 _closing，用户关窗退出时隐藏窗口
+        后仍会弹出模态框，阻塞队列里排在后面的 _finish_close（进程"看似卡死"）。
+        """
+        if self._closing:
+            return
+        if kind == "info":
+            messagebox.showinfo(title, msg)
+        else:
+            messagebox.showerror(title, msg)
+
     def _diff_worker(self, task):
         # type: (Task) -> None
         try:
@@ -347,13 +361,13 @@ class App(object):
         except ScanCancelled:
             self._release_manual(task.id)
             self._ui_put(lambda g=self._wait_gen: self._hide_wait(g))
-            self._ui_put(lambda: messagebox.showinfo("提示", "已取消"))
+            self._ui_put(lambda: self._popup_if_alive("info", "提示", "已取消"))
             self._ui_put(self._refresh_tasks)
         except Exception as e:
             self.logger.error("对比失败 [%s]: %s" % (task.name, e))
             self._release_manual(task.id)
             self._ui_put(lambda g=self._wait_gen: self._hide_wait(g))
-            self._ui_put(lambda: messagebox.showerror("错误", "对比失败：%s" % e))
+            self._ui_put(lambda: self._popup_if_alive("error", "错误", "对比失败：%s" % e))
             self._ui_put(self._refresh_tasks)
 
     def _on_diff_ready(self, task, res):
@@ -429,13 +443,14 @@ class App(object):
             # 统一收尾：审计日志 + 运行期字段 + baseline（与 CLI 路径共用同一实现）
             finalize_sync(task, out, self.store, self.logger)
             self._ui_put(lambda g=self._wait_gen: self._hide_wait(g))
-            self._ui_put(lambda: messagebox.showinfo("完成", "同步完成：%s" % task.last_summary))
+            self._ui_put(lambda: self._popup_if_alive(
+                "info", "完成", "同步完成：%s" % task.last_summary))
         except ScanCancelled:
             self.logger.warn("任务[%s] 已取消" % task.name)
             task.last_status = "已取消"
             self.store.update_runtime(task)
             self._ui_put(lambda g=self._wait_gen: self._hide_wait(g))
-            self._ui_put(lambda: messagebox.showinfo("提示", "已取消"))
+            self._ui_put(lambda: self._popup_if_alive("info", "提示", "已取消"))
         except Exception as e:
             self.logger.error("同步失败 [%s]: %s" % (task.name, e))
             # 异常路径落盘失败状态（与 _run_task 一致），避免停留上次的"成功"
@@ -447,7 +462,7 @@ class App(object):
             except Exception:
                 pass
             self._ui_put(lambda g=self._wait_gen: self._hide_wait(g))
-            self._ui_put(lambda: messagebox.showerror("错误", "同步失败：%s" % e))
+            self._ui_put(lambda: self._popup_if_alive("error", "错误", "同步失败：%s" % e))
         finally:
             self._release_manual(task.id)
             self._ui_put(self._refresh_tasks)

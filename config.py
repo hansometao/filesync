@@ -212,6 +212,17 @@ class Task(object):
         policy = d.get("conflict_policy", CONFLICT_NEWER)
         if policy not in CONFLICT_POLICIES:
             policy = CONFLICT_NEWER
+        # include/exclude 元素类型清洗：与 Schedule.times 同理，坏数据（如
+        # include=[123]）原样通过会让 scanner 的 fnmatch.fnmatch(pattern=123)
+        # 抛 TypeError，导致同步整体失败。仅保留 str 且 strip 后非空的条目。
+        raw_inc = d.get("include", []) or []
+        include = [x.strip() for x in raw_inc
+                   if isinstance(x, str) and x.strip()] \
+            if isinstance(raw_inc, list) else []
+        raw_exc = d.get("exclude", []) or []
+        exclude = [x.strip() for x in raw_exc
+                   if isinstance(x, str) and x.strip()] \
+            if isinstance(raw_exc, list) else []
         return cls(
             id=d.get("id") or uuid.uuid4().hex,
             name=d.get("name", "") if isinstance(d.get("name"), str) else "",
@@ -222,8 +233,8 @@ class Task(object):
             two_way_delete=bool(d.get("two_way_delete", False)),
             compare=d.get("compare", "auto"),
             schedule=Schedule.from_dict(d.get("schedule")),
-            include=list(d.get("include", []) or []),
-            exclude=list(d.get("exclude", []) or []),
+            include=include,
+            exclude=exclude,
             conflict_policy=policy,
             last_run=last_run,
             last_status=d.get("last_status", "") if isinstance(d.get("last_status"), str) else "",
@@ -424,3 +435,13 @@ class TaskStore(object):
             if t.id == task_id:
                 return t
         return None
+
+    def snapshot(self):
+        # type: () -> List[Task]
+        """持锁返回任务列表副本，供跨线程安全迭代（调度器轮询等）。
+
+        直接迭代 self.tasks 时，若 GUI 线程并发 add/remove 原地修改列表，
+        会抛 RuntimeError: list changed size during iteration。
+        """
+        with self._lock:
+            return list(self.tasks)

@@ -25,6 +25,7 @@
 import os
 import shutil
 import stat as stat_mod
+import threading
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from utils.paths import longpath, join_rel, ensure_dir
@@ -291,12 +292,13 @@ def _do_copy(from_path, to_path):
     # type: (str, str) -> None
     """原子复制：先写临时文件再替换，进程中途被杀不会留下半截目标文件。
 
-    tmp 名带进程号：调度器允许不同任务并行，两个任务写同一目标文件时
-    固定名 tmp 会互踩产生交叉损坏；后缀保持 .tmp~ 与 scanner 的排除
+    tmp 名带进程号 + 线程号：调度器允许不同任务并行（同进程内多个 worker
+    线程），仅用 PID 时两个线程写同一目标文件会互踩同一 tmp 产生交叉损坏；
+    线程号在同进程内唯一，彻底隔离。后缀保持 .tmp~ 与 scanner 的排除
     规则（endswith(".tmp~")）兼容。
     """
     ensure_dir(os.path.dirname(to_path))
-    tmp = "%s.%d.tmp~" % (to_path, os.getpid())
+    tmp = "%s.%d.%d.tmp~" % (to_path, os.getpid(), threading.get_ident())
     try:
         shutil.copy2(longpath(from_path), longpath(tmp))
         os.replace(longpath(tmp), longpath(to_path))
@@ -415,18 +417,20 @@ def _safe_mtime(path):
 
 
 def apply_actions(actions, conflict_policy, on_ask=None, cancel_event=None):
-    # type: (List[Action], str, Optional[Any], Optional[Any]) -> Tuple[List[str], int, Set[str]]
-    """执行动作列表。返回 (日志行列表, 失败数, 未解决冲突 rel 集合)；
+    # type: (List[Action], str, Optional[Any], Optional[Any]) -> Tuple[List[str], int, Set[str], Set[str]]
+    """执行动作列表。返回 (日志行列表, 失败数, 未解决冲突 rel 集合, 失败动作 rel 集合)；
     cancel_event 置位时抛 ScanCancelled。
 
     删除动作的 from_path 记录其所属根目录，执行后在该根内清理空目录。
-    未解决冲突（skip / 备份失败 / 覆盖失败）的 rel 由调用方在重建 baseline
-    时排除，确保下次同步重新进入冲突流程，而非静默单侧覆盖。
+    未解决冲突（skip / 备份失败 / 覆盖失败）与**普通复制/删除失败**的 rel
+    都由调用方在重建 baseline 时排除：失败意味着两端尚未一致，若照常写入
+    baseline，下次同步会把失败项判为 same/方向反转（静默丢数据或不再重试）。
     """
     logger = get_logger()
     logs = []
     fail = 0
     unresolved = set()  # type: Set[str]
+    failed_rels = set()  # type: Set[str]
     for action in actions:
         if cancel_event is not None and cancel_event.is_set():
             raise ScanCancelled()
@@ -460,6 +464,7 @@ def apply_actions(actions, conflict_policy, on_ask=None, cancel_event=None):
                 logger.error("类型冲突未处理(文件/目录同名): %s" % action.rel)
                 logs.append("[类型冲突] %s: %s" % (action.rel, action.detail))
                 fail += 1
+                failed_rels.add(action.rel)
             elif action.kind == "conflict":
                 msg, conflict_failed, unresolved_kept = _resolve_conflict(
                     action, conflict_policy, on_ask)
@@ -468,6 +473,9 @@ def apply_actions(actions, conflict_policy, on_ask=None, cancel_event=None):
                     fail += 1
                 if unresolved_kept:
                     unresolved.add(action.rel)
+                elif conflict_failed:
+                    # 备份成功但覆盖失败等：两端仍不一致，同样不能进 baseline
+                    failed_rels.add(action.rel)
             elif action.kind == "extra":
                 logs.append("[保留] %s" % action.rel)
         except ScanCancelled:
@@ -476,7 +484,8 @@ def apply_actions(actions, conflict_policy, on_ask=None, cancel_event=None):
             logger.error("执行失败 %s: %s" % (action.rel, e))
             logs.append("[失败] %s: %s" % (action.rel, e))
             fail += 1
-    return logs, fail, unresolved
+            failed_rels.add(action.rel)
+    return logs, fail, unresolved, failed_rels
 
 
 def _stat_meta(root, rel):
@@ -599,9 +608,9 @@ def apply_diff(task, diff_result, conflict_policy=None, self_paths=None,
     if policy == CONFLICT_ASK and on_ask is None:
         # 无人值守（调度器）时回退默认，避免卡死
         policy = CONFLICT_NEWER
-    logs, fail, unresolved = apply_actions(diff_result.actions, policy,
-                                           on_ask=on_ask,
-                                           cancel_event=cancel_event)
+    logs, fail, unresolved, failed_rels = apply_actions(
+        diff_result.actions, policy, on_ask=on_ask,
+        cancel_event=cancel_event)
     summary = diff_result.summary()
     if fail:
         summary += ", 失败 %d" % fail
@@ -611,10 +620,13 @@ def apply_diff(task, diff_result, conflict_policy=None, self_paths=None,
     if task.mode == MODE_TWO_WAY:
         old_bl = task.baseline or {}
         dirty = _dst_dirty_rels(diff_result.actions, src_root, dst_root)
+        # 失败动作（未解决冲突 + 复制/删除失败）一律不进 baseline：
+        # 两端尚未一致，写入会导致下次判 same/方向反转（静默丢数据或不重试）
         task.baseline = build_baseline_after(
             task, dst_root, self_paths=self_paths,
             snap=dst_snap, old_baseline=old_bl, dirty_rels=dirty,
-            cancel_event=cancel_event, exclude_rels=unresolved)
+            cancel_event=cancel_event,
+            exclude_rels=unresolved | failed_rels)
     task.last_run = now_epoch()
     task.last_summary = summary
     logger.info("任务[%s] 完成: %s" % (task.name, summary))

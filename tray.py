@@ -24,8 +24,17 @@ from logger import get_logger
 
 # ---- Win32 常量（自给自足，避免依赖 win32con） ----
 WM_APP = 0x8000
-NIN_SELECT_3 = 0x0401      # NOTIFYICON_VERSION 3 的左键单击通知
-NIN_SELECT_4 = 0x0404      # NOTIFYICON_VERSION 4 的左键单击通知
+# 托盘回调 lParam 语义（shellapi.h）：
+#   uVersion=0 或 NOTIFYICON_VERSION(3)：lParam 是原始鼠标/键盘消息（如 WM_LBUTTONUP）；
+#   uVersion=NOTIFYICON_VERSION_4：LOWORD(lParam) 是 NIN_* 通知事件。
+# 本实现用 V3（lParam=WM_LBUTTONUP 等），但保留 V4 的 NIN_SELECT 兜底，
+# 未来若升级版本号无需改动匹配逻辑。以下为 SDK 真实定义（WM_USER=0x0400）：
+NIN_SELECT = 0x0400           # WM_USER+0：单击选中图标（V4 模式左键）
+NIN_KEYSELECT = 0x0401        # WM_USER+1：键盘选择（V4 模式）
+NIN_BALLOONSHOW = 0x0402      # WM_USER+2
+NIN_BALLOONHIDE = 0x0403      # WM_USER+3
+NIN_BALLOONTIMEOUT = 0x0404   # WM_USER+4
+NIN_BALLOONUSERCLICK = 0x0405 # WM_USER+5
 WM_LBUTTONUP = 0x0202
 WM_RBUTTONUP = 0x0205
 WM_CONTEXTMENU = 0x007B
@@ -101,6 +110,7 @@ class TrayIcon(object):
         self._main_hwnd = main_hwnd  # type: Optional[int]  # 主窗口句柄，菜单关闭后还焦点
         self._window = None          # type: Optional[Any]
         self._icon = None            # type: Optional[Any]
+        self._icon_owned = False     # 图标是否自有（LoadImageW 文件加载，可 DestroyIcon）
         self._callback_ref = None    # type: Optional[Any]  # 防止 WNDPROC 被 GC
         self._nid = None             # type: Optional[NOTIFYICONDATAW]
         self._create(title, icon_path)
@@ -150,8 +160,9 @@ class TrayIcon(object):
                 raise ctypes.WinError()  # type: ignore[attr-defined]
             self._window = hwnd
 
-            # 图标：优先 app.ico，缺失回退系统默认图标
-            self._icon = self._load_icon(user32, icon_path)
+            # 图标：优先 app.ico，缺失回退系统默认图标。
+            # 返回 (句柄, 是否自有)：自有图标可 DestroyIcon，共享图标禁止
+            self._icon, self._icon_owned = self._load_icon(user32, icon_path)
 
             nid = NOTIFYICONDATAW()
             nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
@@ -215,11 +226,14 @@ class TrayIcon(object):
                 pass
             self._window = None
         if self._icon is not None:
-            try:
-                user32.DestroyIcon(self._icon)
-            except Exception:
-                pass
+            # 仅销毁自有图标；系统共享图标（IDI_APPLICATION）禁止 DestroyIcon
+            if self._icon_owned:
+                try:
+                    user32.DestroyIcon(self._icon)
+                except Exception:
+                    pass
             self._icon = None
+            self._icon_owned = False
         try:
             user32.UnregisterClassW(self._CLASS_NAME, hinst)
         except Exception:
@@ -227,7 +241,13 @@ class TrayIcon(object):
         self._callback_ref = None
 
     def _load_icon(self, user32, icon_path):
-        # type: (Any, Optional[str]) -> Any
+        # type: (Any, Optional[str]) -> Tuple[Any, bool]
+        """加载图标，返回 (句柄, 是否自有)。
+
+        自有图标（LoadImageW 从文件加载）由调用方负责 DestroyIcon；
+        系统共享图标（LoadIconW 的 IDI_APPLICATION）**禁止** DestroyIcon
+        （MSDN：共享图标由系统管理，销毁是未定义行为）。
+        """
         if icon_path is None:
             icon_path = os.path.join(app_dir(), "app.ico")
         # onefile 打包后 app.ico 经 spec 的 datas 收集、运行时解压在 _MEIPASS
@@ -245,8 +265,8 @@ class TrayIcon(object):
                     None, p, IMAGE_ICON, 16, 16,
                     LR_LOADFROMFILE | LR_DEFAULTSIZE)
                 if h:
-                    return h
-        return user32.LoadIconW(None, IDI_APPLICATION)
+                    return h, True
+        return user32.LoadIconW(None, IDI_APPLICATION), False
 
     def destroy(self):
         # type: () -> None
@@ -267,8 +287,11 @@ class TrayIcon(object):
             except Exception:
                 pass
         if self._icon is not None:
-            self._user32().DestroyIcon(self._icon)
+            # 仅销毁自有图标；系统共享图标（IDI_APPLICATION）禁止 DestroyIcon
+            if self._icon_owned:
+                self._user32().DestroyIcon(self._icon)
             self._icon = None
+            self._icon_owned = False
         self._callback_ref = None
 
     def __del__(self):
@@ -287,7 +310,9 @@ class TrayIcon(object):
         if msg == WM_APP + 1:
             evt = lparam & 0xFFFF
             try:
-                if evt in (NIN_SELECT_3, NIN_SELECT_4, WM_LBUTTONUP):
+                # V3 模式 lParam=WM_LBUTTONUP（原始鼠标消息）；
+                # V4 模式 lParam=NIN_SELECT(0x0400)。两者都算左键激活。
+                if evt in (NIN_SELECT, WM_LBUTTONUP):
                     if self._on_activate is not None:
                         self._on_activate()
                 elif evt in (WM_RBUTTONUP, WM_CONTEXTMENU):
