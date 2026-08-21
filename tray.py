@@ -188,7 +188,7 @@ class TrayIcon(object):
         user32.SetActiveWindow.restype = wintypes.HWND
         user32.CreatePopupMenu.restype = wintypes.HMENU
         user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-        user32.GetCurrentThreadId.restype = wintypes.DWORD
+        kernel32.GetCurrentThreadId.restype = wintypes.DWORD  # 属于 kernel32，不在 user32
         kernel32.GetModuleHandleW.restype = wintypes.HMODULE
         # 返回值/布尔/原子类
         user32.DefWindowProcW.restype = ctypes.c_ssize_t   # LRESULT
@@ -318,9 +318,10 @@ class TrayIcon(object):
         if self._main_hwnd is not None and self._main_hwnd:
             try:
                 user32 = self._user32()
+                kernel32 = getattr(ctypes, "windll").kernel32
                 # AttachThreadInput 绕过前台窗口锁定限制
                 tid = user32.GetWindowThreadProcessId(self._main_hwnd, None)
-                cur_tid = user32.GetCurrentThreadId()
+                cur_tid = kernel32.GetCurrentThreadId()  # GetCurrentThreadId 属 kernel32
                 if tid and tid != cur_tid:
                     user32.AttachThreadInput(cur_tid, tid, True)
                     user32.SetForegroundWindow(self._main_hwnd)
