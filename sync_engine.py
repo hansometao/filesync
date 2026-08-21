@@ -652,6 +652,12 @@ def perform_sync(task, logger=None, conflict_override=None, dry_run=False,
     # 的 ensure_dir 会自动创建）。
     if not os.path.isdir(longpath(src_root)):
         return _abort("源目录不可达: %s" % src_root)
+    # C1 防线一（目标侧）：目标不存在仅在**首次同步**（baseline 为空）时合法。
+    # 若已有非空 baseline（此前同步成功过）而目标根缺失——U 盘被拔/路径漂移/
+    # 权限被拒——扫描返回空快照，diff 会把 baseline 内全部条目判成 removed，
+    # 配合 two_way_delete 生成"删除(A 侧)"动作，**误删源文件**（与源侧同型风险）。
+    if task.baseline and not os.path.isdir(longpath(dst_root)):
+        return _abort("目标目录不可达: %s" % dst_root)
     if progress:
         progress("扫描源目录...")
     src_errors = []  # type: List[str]

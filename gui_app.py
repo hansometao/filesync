@@ -56,6 +56,7 @@ class App(object):
         self._wait_prog = None             # type: Optional[ttk.Label]
         self._wait_bar = None              # type: Optional[ttk.Progressbar]
         self._wait_cancellable = False
+        self._wait_gen = 0                 # 等待窗代数：残留 _hide_wait 防误销毁新窗
         self._cancel = threading.Event()   # 手动同步的取消信号
         self._prog_count = 0
         self._last_prog_ts = 0.0           # P3: 进度节流上次投递时间戳
@@ -284,9 +285,14 @@ class App(object):
 
     def _release_manual(self, task_id):
         # type: (str) -> None
-        """释放手动同步的运行槽与全局门闩（仅手动同步路径调用）。"""
-        self._manual_busy = False
+        """释放手动同步的运行槽与全局门闩（仅手动同步路径调用）。
+
+        顺序：先 release 运行槽、后清 _manual_busy。若先清门闩，窗口期内
+        新手动同步可越过 _manual_busy 检查并 acquire 其他任务的运行槽，
+        与新 worker 尾部的 _ui_put 交错（跨任务互斥门闩形同虚设）。
+        """
         self.scheduler.release(task_id)
+        self._manual_busy = False
 
     def _on_sync_now(self):
         # type: () -> None
@@ -340,13 +346,13 @@ class App(object):
             self._ui_put(lambda: self._on_diff_ready(task, res))
         except ScanCancelled:
             self._release_manual(task.id)
-            self._ui_put(self._hide_wait)
+            self._ui_put(lambda g=self._wait_gen: self._hide_wait(g))
             self._ui_put(lambda: messagebox.showinfo("提示", "已取消"))
             self._ui_put(self._refresh_tasks)
         except Exception as e:
             self.logger.error("对比失败 [%s]: %s" % (task.name, e))
             self._release_manual(task.id)
-            self._ui_put(self._hide_wait)
+            self._ui_put(lambda g=self._wait_gen: self._hide_wait(g))
             self._ui_put(lambda: messagebox.showerror("错误", "对比失败：%s" % e))
             self._ui_put(self._refresh_tasks)
 
@@ -422,13 +428,13 @@ class App(object):
                              cancel_event=self._cancel, dst_snap=res.get("dst_snap"))
             # 统一收尾：审计日志 + 运行期字段 + baseline（与 CLI 路径共用同一实现）
             finalize_sync(task, out, self.store, self.logger)
-            self._ui_put(self._hide_wait)
+            self._ui_put(lambda g=self._wait_gen: self._hide_wait(g))
             self._ui_put(lambda: messagebox.showinfo("完成", "同步完成：%s" % task.last_summary))
         except ScanCancelled:
             self.logger.warn("任务[%s] 已取消" % task.name)
             task.last_status = "已取消"
             self.store.update_runtime(task)
-            self._ui_put(self._hide_wait)
+            self._ui_put(lambda g=self._wait_gen: self._hide_wait(g))
             self._ui_put(lambda: messagebox.showinfo("提示", "已取消"))
         except Exception as e:
             self.logger.error("同步失败 [%s]: %s" % (task.name, e))
@@ -440,7 +446,7 @@ class App(object):
                 self.store.update_runtime(task)
             except Exception:
                 pass
-            self._ui_put(self._hide_wait)
+            self._ui_put(lambda g=self._wait_gen: self._hide_wait(g))
             self._ui_put(lambda: messagebox.showerror("错误", "同步失败：%s" % e))
         finally:
             self._release_manual(task.id)
@@ -517,6 +523,7 @@ class App(object):
     # ---------- 等待提示（含进度与取消） ----------
     def _show_wait(self, msg, cancellable=False):
         # type: (str, bool) -> None
+        self._wait_gen += 1  # 每次显示都提升代数，残留的旧 _hide_wait 不再能销毁本窗
         if self._wait is not None:
             try:
                 if self._wait.winfo_exists():
@@ -571,8 +578,12 @@ class App(object):
             except tk.TclError:
                 pass
 
-    def _hide_wait(self):
-        # type: () -> None
+    def _hide_wait(self, gen=None):
+        # type: (Optional[int]) -> None
+        # 代数校验：若期间已显示新的等待窗（gen 不匹配），残留的旧 hide
+        # 不得销毁新窗（worker 先入队 hide、后置 _manual_busy 的窗口期竞态）
+        if gen is not None and gen != self._wait_gen:
+            return
         if self._wait is not None:
             try:
                 if self._wait_bar is not None:
@@ -762,6 +773,20 @@ class App(object):
             # type: () -> None
             try:
                 self.scheduler.wait_workers(5)
+                # 手动同步 worker（diff/apply）同样有界等待：此前仅等调度
+                # worker，手动线程游离在 wait_workers 之外，进程退出时被强杀，
+                # 大文件复制中途被杀会留下半截 .tmp~ 残留
+                deadline = time.time() + 5
+                with self._workers_lock:
+                    workers = list(self._workers)
+                for th in workers:
+                    remain = deadline - time.time()
+                    if remain <= 0:
+                        break
+                    try:
+                        th.join(timeout=remain)
+                    except Exception:
+                        pass
             finally:
                 self._ui_put(self._finish_close)
         threading.Thread(target=_shutdown, daemon=True).start()

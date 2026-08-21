@@ -137,6 +137,8 @@ def _linux_enable(home, cmd):
     try:
         path = _linux_path(home)
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        # XDG 规范：Exec 键中的字面 % 是保留字符（字段代码 %f/%u 等），
+        # 路径含 %（如 "100%prog"）必须转义为 %% 否则解析器误读
         content = (
             "[Desktop Entry]\n"
             "Type=Application\n"
@@ -144,7 +146,7 @@ def _linux_enable(home, cmd):
             "Exec=%s\n"
             "Terminal=false\n"
             "X-GNOME-Autostart-enabled=true\n"
-            "Hidden=false\n" % cmd
+            "Hidden=false\n" % cmd.replace("%", "%%")
         )
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)

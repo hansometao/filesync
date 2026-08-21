@@ -1338,6 +1338,29 @@ check(res3.get("aborted") is True and t3.last_status == "失败",
       "C1b: 扫描不完整时中止(宁失败不误删)")
 check(os.path.exists(os.path.join(dst, "keep.txt")), "C1b: 快照不完整时目标未被误删")
 
+# --- C1c: 目标目录不可达 + 已有非空 baseline -> 中止，绝不误删源侧 ---
+# 对称于 C1：目标缺失仅在首次同步（baseline 为空）时合法；已有 baseline 时
+# 目标被拔/路径漂移会让快照全空，two_way_delete 会把源侧误判为"删除(A 侧)"
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src")
+dst = os.path.join(d, "dst")
+os.makedirs(src)
+os.makedirs(dst)
+write(os.path.join(src, "a.txt"), "hello")
+write(os.path.join(dst, "b.txt"), "world")
+t1c = fresh_task(MODE_TWO_WAY, src, dst, two_way_delete=True)
+perform_sync(t1c)   # 首次同步，回填 baseline
+check(bool(t1c.baseline), "C1c 前置: 双向首次同步建立 baseline")
+check(os.path.exists(os.path.join(src, "a.txt")), "C1c 前置: 源文件存在")
+shutil.rmtree(dst)  # 模拟目标盘被拔/路径漂移
+res1c = perform_sync(t1c)  # 复用同一任务对象（带 baseline 续跑）
+check(res1c.get("aborted") is True and t1c.last_status == "失败",
+      "C1c: 目标不可达时中止(aborted)")
+check(os.path.exists(os.path.join(src, "a.txt")),
+      "C1c: 源文件未被误删(此前会生成全量'删除(A 侧)')")
+check(os.path.exists(os.path.join(src, "b.txt")),
+      "C1c: 目标侧独有文件同样未被误删")
+
 # --- C2: skip 的冲突不写 baseline -> 下次重新检出冲突，不被固化为单侧覆盖 ---
 d = tempfile.mkdtemp()
 src = os.path.join(d, "src")

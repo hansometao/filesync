@@ -28,6 +28,7 @@ class Scheduler(object):
         self.logger = logger or get_logger()
         self._running = set()             # type: set
         self._lock = threading.Lock()
+        self._next_lock = threading.Lock()  # 保护 next_run 读写（poll 线程 vs GUI 线程）
         self._stop = False
         self._thread = None               # type: Optional[threading.Thread]
         self._active = []                 # type: List[threading.Thread]
@@ -56,8 +57,9 @@ class Scheduler(object):
         # 短停：只置位 + 清 next_run + 短暂等待循环线程退出，不在 GUI 线程做长等待
         self._stop = True
         self.running = False
-        for t in self.store.tasks:
-            t.next_run = None
+        with self._next_lock:
+            for t in self.store.tasks:
+                t.next_run = None
         th = self._thread
         if th is not None and th.is_alive():
             try:
@@ -151,7 +153,8 @@ class Scheduler(object):
         # 重算（interval 锚定 last_run、daily/weekly 重算未来时刻）。
         # 若不重置，停机错过周期后的手动触发会让 next_run 保持过期值，
         # 任务一完成即被调度器立即再触发一次（多余同步）。
-        task.next_run = None
+        with self._next_lock:
+            task.next_run = None
         return True
 
     def _worker(self, task_id):
@@ -227,31 +230,37 @@ class Scheduler(object):
     def _poll_task(self, task, now):
         # type: (Task, float) -> None
         if not (task.schedule.enabled and task.enabled):
-            task.next_run = None
+            with self._next_lock:
+                task.next_run = None
             return
-        # next_run 粘性化：只在未设置时计算，避免每秒重算导致触发点无限滑移
-        if task.next_run is None:
-            nxt = self._compute_next(task, now)
-            # 停机补跑（仅冷启动分支）：daily/weekly 错过的计划时刻在下次
-            # 启动时补跑一次（README 承诺）。不放 _compute_next —— 触发后的
-            # 重算也会走它，配合运行中顺延会造成每次触发跑两遍。
-            # 任务正在运行时不补（run_now 刚触发过，last_run 尚未更新）
-            if (nxt is not None and task.id not in self._running
-                    and self._missed_since_last_run(task, now)):
-                nxt = now
-            task.next_run = nxt
-        nxt = task.next_run
-        if nxt is not None and now >= nxt:
-            started = False
-            with self._lock:
-                if task.id not in self._running:
-                    self._running.add(task.id)
-                    t = threading.Thread(
-                        target=self._worker, args=(task.id,),
-                        name="sched-%s" % task.id, daemon=True)
-                    self._active.append(t)
-                    t.start()
-                    started = True
+        # next_run 粘性化：只在未设置时计算，避免每秒重算导致触发点无限滑移。
+        # next_run 由 poll 线程读写，stop()/run_now() 在 GUI 线程也会写它，
+        # 用 _next_lock 保护（与 _lock 分两把锁且不嵌套，避免死锁）。
+        with self._next_lock:
+            if task.next_run is None:
+                nxt = self._compute_next(task, now)
+                # 停机补跑（仅冷启动分支）：daily/weekly 错过的计划时刻在下次
+                # 启动时补跑一次（README 承诺）。不放 _compute_next —— 触发后的
+                # 重算也会走它，配合运行中顺延会造成每次触发跑两遍。
+                # 任务正在运行时不补（run_now 刚触发过，last_run 尚未更新）
+                if (nxt is not None and task.id not in self._running
+                        and self._missed_since_last_run(task, now)):
+                    nxt = now
+                task.next_run = nxt
+            nxt = task.next_run
+        if nxt is None or now < nxt:
+            return
+        started = False
+        with self._lock:
+            if task.id not in self._running:
+                self._running.add(task.id)
+                t = threading.Thread(
+                    target=self._worker, args=(task.id,),
+                    name="sched-%s" % task.id, daemon=True)
+                self._active.append(t)
+                t.start()
+                started = True
+        with self._next_lock:
             if started:
                 # 立即推进下次触发时间，避免本周期重复。
                 # interval 模式以"本次触发时刻"为锚点而非 last_run：
@@ -263,9 +272,18 @@ class Scheduler(object):
                 else:
                     task.next_run = self._compute_next(task, now + 1)
             else:
-                # 任务运行中：计划顺延重试而非丢弃（daily 一次性时刻尤其重要）
-                task.next_run = now + 60
-                self.logger.warn("任务[%s] 正在运行，计划顺延 60 秒" % task.name)
+                # 任务运行中：计划顺延重试而非丢弃（daily 一次性时刻尤其重要）。
+                # 顺延时长按计划类型区分：
+                # - interval：周期任务无需在完成后再追跑一次，直接推到"此刻起
+                #   一个完整周期后"，避免 run_now/到点时运行中造成的多余重跑
+                #   （此前固定 +60s，interval 任务完成后 60 秒被自动再触发）；
+                # - daily/weekly：一次性时刻错过即浪费，顺延 60 秒重试补跑。
+                if task.schedule.type == SCHED_INTERVAL:
+                    task.next_run = now + max(1, int(task.schedule.interval_minutes)) * 60
+                else:
+                    task.next_run = now + 60
+        if not started:
+            self.logger.warn("任务[%s] 正在运行，计划顺延" % task.name)
 
     def _loop(self, gen):
         # type: (int) -> None

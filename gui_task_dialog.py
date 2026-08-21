@@ -221,7 +221,18 @@ class TaskDialog(tk.Toplevel):
         times = [t.strip() for t in self._times.get().split(",") if t.strip()]
         include = [t.strip() for t in self._include.get().split(",") if t.strip()]
         exclude = [t.strip() for t in self._exclude.get().split(",") if t.strip()]
-        weekdays = [int(w) for w in self._weekdays.get().split(",") if w.strip()]
+        # 周几解析：weekly 启用时 validate_schedule_input 已保证全为 1-7 数字；
+        # 但 daily/interval/未启用时该栏残留的垃圾输入（如 "abc"）不会经过校验，
+        # 此处防御性忽略非法值（与 interval 栏的兜底一致），绝不因无关字段崩溃
+        weekdays = []
+        for w in self._weekdays.get().split(","):
+            w = w.strip()
+            if not w:
+                continue
+            try:
+                weekdays.append(int(w))
+            except ValueError:
+                pass
 
         if self.is_new:
             t = Task()
