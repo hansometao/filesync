@@ -230,12 +230,22 @@ class TrayIcon(object):
         # type: (Any, Optional[str]) -> Any
         if icon_path is None:
             icon_path = os.path.join(app_dir(), "app.ico")
-        if icon_path and os.path.isfile(icon_path):
-            h = user32.LoadImageW(
-                None, icon_path, IMAGE_ICON, 16, 16,
-                LR_LOADFROMFILE | LR_DEFAULTSIZE)
-            if h:
-                return h
+        # onefile 打包后 app.ico 经 spec 的 datas 收集、运行时解压在 _MEIPASS
+        # 临时目录；app_dir() 返回 exe 所在目录（配置/日志落点），两者不同。
+        # 优先 _MEIPASS（打包自带），其次 exe 目录（用户手动放置），最后系统默认。
+        candidates = []  # type: List[str]
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(os.path.join(str(meipass), "app.ico"))
+        if icon_path:
+            candidates.append(icon_path)
+        for p in candidates:
+            if p and os.path.isfile(p):
+                h = user32.LoadImageW(
+                    None, p, IMAGE_ICON, 16, 16,
+                    LR_LOADFROMFILE | LR_DEFAULTSIZE)
+                if h:
+                    return h
         return user32.LoadIconW(None, IDI_APPLICATION)
 
     def destroy(self):

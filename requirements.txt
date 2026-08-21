@@ -4,6 +4,12 @@
 # 下面为可选的加速依赖（缺失时自动回退到 hashlib，功能不受影响）：
 xxhash>=2.0.0   # 可选：文件内容哈希加速（比 md5 更快）；Windows 7 上需 CPython 3.8 对应的 wheel
 
+# 构建期依赖（仅打包 exe 时需要，运行期不需要）：
+#   pip install "pyinstaller==5.13.2" pillow
+#   pyinstaller  : 打包工具（Windows 7 目标机建议 5.x，见 build_exe.py 头注释）
+#   pillow       : 生成占位图标 app.ico（make_icon.py）；缺 Pillow 时 build_exe.py
+#                  会给出安装指引而非失败，也可自行放置 app.ico 到项目根目录
+
 # 安装方式（可选）：
 #   pip install -r requirements.txt
 #

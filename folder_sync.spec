@@ -22,7 +22,9 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    # 把 app.ico 作为数据文件打进 onefile 包：运行时解压到 _MEIPASS 临时目录，
+    # tray.py 优先从那里加载托盘图标（exe 图标仅打包期生效，运行时还需文件）
+    datas=[('app.ico', '.')] if __import__('os').path.exists('app.ico') else [],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

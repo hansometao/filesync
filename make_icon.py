@@ -4,6 +4,10 @@
 依赖 Pillow（仅打包期需要，运行期不依赖）。生成多尺寸 16/32/48/64/128/256，
 Windows 端 PyInstaller 会读取该 .ico 作为 exe 图标；Linux 端仅作占位。
 
+Pillow 为惰性导入（仅在 make_icon() 内）：缺 Pillow 时模块可正常导入，
+调用 make_icon() 才抛 ImportError——build_exe 会捕获并给出安装提示，
+而不是让打包脚本裸崩溃。
+
 用法：
     python make_icon.py            # 生成 app.ico 到当前目录
     python make_icon.py 其它.ico   # 指定输出路径
@@ -11,15 +15,16 @@ Windows 端 PyInstaller 会读取该 .ico 作为 exe 图标；Linux 端仅作占
 
 import os
 import sys
-
-from PIL import Image, ImageDraw
+from typing import Any
 
 SIZES = [16, 32, 48, 64, 128, 256]
 
 
 def _draw_icon(size):
-    # type: (int) -> Image.Image
+    # type: (int) -> Any
     """按给定尺寸画一个「黄色文件夹 + 蓝绿同步双箭头」的透明底图标。"""
+    from PIL import Image, ImageDraw  # 惰性导入：仅生成图标时才需要 Pillow
+
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
 

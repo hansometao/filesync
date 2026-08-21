@@ -28,8 +28,16 @@ def _ensure_icon():
     # type: () -> str
     ico = os.path.join(HERE, "app.ico")
     if not os.path.exists(ico):
-        import make_icon
-        make_icon.make_icon(ico)
+        try:
+            import make_icon
+            make_icon.make_icon(ico)
+        except ImportError:
+            # 缺 Pillow 时 make_icon 惰性导入抛 ImportError，给出安装指引而非裸崩溃
+            print("缺少 app.ico 且未安装 Pillow（生成占位图标需要）:")
+            print("  方案一: pip install pillow  再重试本脚本")
+            print("  方案二: 自行放置 app.ico 到项目根目录后重试")
+            print("  （app.ico 用于 exe 图标与 Windows 托盘图标，缺失不影响打包逻辑）")
+            sys.exit(1)
     return ico
 
 
