@@ -103,6 +103,7 @@ class TrayIcon(object):
         # type: (str, List[Tuple[int, str]], Callable[[int], None], Optional[Callable[[], None]], Optional[str], Optional[int]) -> None
         if not is_supported():
             raise OSError("系统托盘图标仅支持 Windows")
+        self.logger = get_logger()  # 版本协商失败等内部告警落日志
         self._title = title
         self._menu = menu
         self._on_menu = on_menu
@@ -176,9 +177,13 @@ class TrayIcon(object):
 
             if not shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)):
                 raise ctypes.WinError()  # type: ignore[attr-defined]
-            # 协商版本：让左键单击以 NIN_SELECT 形式通知（Win7 支持 V3）
+            # 协商版本：请求 V3 让托盘交互行为与 Win7+ 一致（V3 下左键单击
+            # 以 WM_LBUTTONUP 原始鼠标消息送达回调，而非 NIN_SELECT 通知——
+            # NIN_SELECT 仅 V4 键盘选择/低版本命中，保留处理分支作为防御）。
+            # 若协商失败（uVersion 保持 0 = 旧行为），交互仍可用，仅记录日志。
             nid.uTimeout = NOTIFYICON_VERSION
-            shell32.Shell_NotifyIconW(NIM_SETVERSION, ctypes.byref(nid))
+            if not shell32.Shell_NotifyIconW(NIM_SETVERSION, ctypes.byref(nid)):
+                self.logger.warn("托盘版本协商失败，沿用默认交互行为")
         except Exception:
             # 失败路径清理：窗口/图标/窗口类全部回收，避免残留
             self._cleanup_after_failed_create(user32, kernel32, hinst)
@@ -252,7 +257,9 @@ class TrayIcon(object):
             icon_path = os.path.join(app_dir(), "app.ico")
         # onefile 打包后 app.ico 经 spec 的 datas 收集、运行时解压在 _MEIPASS
         # 临时目录；app_dir() 返回 exe 所在目录（配置/日志落点），两者不同。
-        # 优先 _MEIPASS（打包自带），其次 exe 目录（用户手动放置），最后系统默认。
+        # 优先 _MEIPASS（打包自带），其次 exe 目录（仅源码运行/打包未收集
+        # 图标时兜底；frozen 下 _MEIPASS/app.ico 恒存在，该分支实际不命中），
+        # 最后系统默认。三级加载保证任何形态都有可见图标。
         candidates = []  # type: List[str]
         meipass = getattr(sys, "_MEIPASS", None)
         if meipass:

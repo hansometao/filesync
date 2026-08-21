@@ -21,6 +21,7 @@ _KIND_TAG = {
     "rmdir": "[D-]",
     "type_conflict": "[!]",
     "conflict": "[!]",
+    "conflict_del": "[!]",
     "extra": "[=]",
 }
 _KIND_LABEL = {
@@ -30,6 +31,7 @@ _KIND_LABEL = {
     "rmdir": "删除目录",
     "type_conflict": "类型冲突",
     "conflict": "冲突",
+    "conflict_del": "删除/修改冲突",
     "extra": "仅目标多余",
 }
 

@@ -85,18 +85,22 @@ def next_daily_times(times, from_epoch):
 
 def prev_daily_time(times, before_epoch):
     # type: (List[str], float) -> Optional[float]
-    """<= before_epoch 的最近一个每日触发点（今天已过的或昨天的）。
+    """<= before_epoch 的最近一个每日触发点（今天与过去 7 天内）。
 
     用于调度器判断"停机期间是否错过了计划时刻"（补跑判定）；
-    times 为空或全部非法返回 None。DST 切换日按 86400 平移可能有 1 小时偏差
-    （next/prev 系列同此）：在有 DST 的时区，切换日当天的触发/补跑判定会
-    偏移 ±1h；目标用户（无 DST 时区，如中国）不受影响。
+    times 为空或全部非法返回 None。回看窗口取 8 天与 prev_weekly_time
+    对齐：此前仅回看今天/昨天，停机超过 2 天的错过触发会被判定为
+    "未错过"而不补跑，与"停机期间补跑"的文档承诺不符。
+    DST 切换日按 86400 平移可能有 1 小时偏差（next/prev 系列同此）：
+    在有 DST 的时区，切换日当天的触发/补跑判定会偏移 ±1h；
+    目标用户（无 DST 时区，如中国）不受影响。
     """
     if not times:
         return None
     best = None  # type: Optional[float]
     today = _midnight(before_epoch)
-    for day_offset in (0, 1):  # 今天与昨天：覆盖"今天还没到第一个时刻"的情况
+    # 今天 + 过去 7 天：覆盖长时间停机（如周末/假期后启动）的错过触发
+    for day_offset in range(8):
         day0 = today - day_offset * 86400
         for t in times:
             sec = _hms(t)

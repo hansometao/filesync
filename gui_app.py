@@ -58,6 +58,7 @@ class App(object):
         self._wait_cancellable = False
         self._wait_gen = 0                 # 等待窗代数：残留 _hide_wait 防误销毁新窗
         self._cancel = threading.Event()   # 手动同步的取消信号
+        self._sched_cancel = threading.Event()  # 调度触发的 worker 取消信号（退出时置位）
         self._prog_count = 0
         self._last_prog_ts = 0.0           # P3: 进度节流上次投递时间戳
         self._closing = False
@@ -185,7 +186,9 @@ class App(object):
         self._sched_btn.config(text="停止调度" if running else "启动调度")
         if full:
             self.tree.delete(*self.tree.get_children())
-        for t in self.store.tasks:
+        # 用快照迭代（与 scheduler 一致）：直接迭代 store.tasks 时若未来有
+        # worker 线程增删任务，会抛 list changed size during iteration
+        for t in self.store.snapshot():
             status = "运行中" if self.scheduler.is_task_running(t.id) else (
                 "已禁用" if not t.enabled else (t.last_status or "-"))
             if full:
@@ -236,8 +239,11 @@ class App(object):
             dlg = TaskDialog(self.root, task, self.store)
             self.root.wait_window(dlg)
             if dlg.result is not None:
-                self.store.update(dlg.result)
+                # 编辑模式复用既有 Task 对象：先置 next_run=None 再 update 发布，
+                # 避免对已发布给调度线程的对象做无锁跨线程写（违反 scheduler
+                # _next_lock 协议；置 None 幂等无害，但顺序上先改后发最干净）
                 dlg.result.next_run = None  # 重置，让调度器按新配置重算下次触发
+                self.store.update(dlg.result)
                 self._refresh_tasks(full=True)
                 # 与新增任务一致：编辑后若存在启用的定时任务则自动拉起调度器
                 self._maybe_autostart()
@@ -343,8 +349,12 @@ class App(object):
 
         worker 尾部的 messagebox 若不检查 _closing，用户关窗退出时隐藏窗口
         后仍会弹出模态框，阻塞队列里排在后面的 _finish_close（进程"看似卡死"）。
+        窗口隐藏到托盘（含 --autostart 后台形态）时同样不弹：不可见模态框
+        会阻塞 UI 队列直到用户恢复窗口点掉；结果已写入任务状态列与日志，
+        恢复窗口即可查看。
         """
-        if self._closing:
+        if self._closing or self._tray_hidden:
+            self.logger.info("[托盘隐藏态/退出期] %s: %s" % (title, msg))
             return
         if kind == "info":
             messagebox.showinfo(title, msg)
@@ -471,8 +481,21 @@ class App(object):
     def _run_task(self, task):
         # type: (Task) -> None
         try:
-            res = perform_sync(task, logger=self.logger, self_paths=self.self_paths)
+            # 传 _sched_cancel：退出流程置位后，调度触发的 worker 同样可取消
+            # 大文件复制（此前仅手动 worker 传 _cancel，调度 worker 靠 5s 有界
+            # join 强杀，仍可能留半截 .tmp~ 残留）
+            res = perform_sync(task, logger=self.logger, self_paths=self.self_paths,
+                               cancel_event=self._sched_cancel)
             finalize_sync(task, res, self.store, self.logger)
+        except ScanCancelled:
+            self.logger.warn("任务[%s] 已取消" % task.name)
+            task.last_run = time.time()
+            task.last_status = "已取消"
+            task.last_summary = "用户退出/取消"
+            try:
+                self.store.update_runtime(task)
+            except Exception:
+                pass
         except Exception as e:
             self.logger.error("任务执行异常 [%s]: %s" % (task.name, e))
             # 异常路径同样落盘失败状态：否则界面与 tasks.json 里停留上一次的
@@ -629,7 +652,16 @@ class App(object):
         # type: () -> None
         if self._closing:
             return
-        self._refresh_tasks(full=False)
+        try:
+            self._refresh_tasks(full=False)
+        except Exception:
+            # 兜底：_refresh_tasks 抛异常（如窗口销毁竞态）不能让 after 链中断，
+            # 否则界面状态永久停更且无日志；记录后继续续期
+            import traceback
+            try:
+                self.logger.error("刷新任务列表异常: " + traceback.format_exc())
+            except Exception:
+                pass
         try:
             self._tick_id = self.root.after(1000, self._tick)
         except tk.TclError:
@@ -780,6 +812,7 @@ class App(object):
         except tk.TclError:
             pass
         self._cancel.set()
+        self._sched_cancel.set()   # 调度 worker 一并取消（见 _run_task）
         self._hide_wait()
         self.scheduler.stop()
         # 等待收尾放到后台线程（有界），主线程保持事件循环处理 UI 队列；

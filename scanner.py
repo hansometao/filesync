@@ -16,6 +16,7 @@ scan / hash_file 在 worker 线程运行。传入的 `progress` 回调在 worker
 
 import os
 import fnmatch
+import re
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from utils.paths import longpath, is_longpath_supported
@@ -55,6 +56,10 @@ def _make_hasher():
 
 _HASHER = _make_hasher()  # type: Any
 
+# 冲突备份文件名：<原文件>.conflict-<YYYYMMDD-HHMMSS.mmm>[-序号]
+# 精确匹配避免误伤真实用户文件（如 report.conflict-final.docx 不应被排除）
+_CONFLICT_BACKUP_RE = re.compile(r"\.conflict-\d{8}-\d{6}\.\d{3}(?:-\d+)?$")
+
 
 def hash_file(path, chunk=1 << 20, cancel_event=None):
     # type: (str, int, Optional[Any]) -> Optional[str]
@@ -85,7 +90,10 @@ def _matched(name, rel, patterns):
         return False
     for p in patterns:
         p2 = p.rstrip("/")
-        if fnmatch.fnmatch(name, p) or fnmatch.fnmatch(rel, p) or fnmatch.fnmatch(name, p2):
+        # 对 name 与 rel 分别去尾斜杠匹配：嵌套目录模式如 "foo/bar/" 必须能
+        # 命中 rel="foo/bar" 的目录；仅对 name 去斜杠会让嵌套模式完全失效
+        if (fnmatch.fnmatch(name, p) or fnmatch.fnmatch(rel, p)
+                or fnmatch.fnmatch(name, p2) or fnmatch.fnmatch(rel, p2)):
             return True
     return False
 
@@ -135,6 +143,21 @@ def scan(directory, include=None, exclude=None, self_paths=None, with_hash=False
         if error_sink is not None:
             error_sink.append(msg)
 
+    def _iter_scandir(entries, root, on_err):
+        # type: (Any, str, Callable[[str], None]) -> Any
+        """安全迭代 scandir 结果：迭代器在 next() 时也可能抛 OSError
+        （目录被并发删除等），捕获后记录错误并正常结束，不让异常冲出 scan
+        打到调用方；快照不完整由 error_sink 机制交给 perform_sync 中止。
+        """
+        try:
+            while True:
+                yield next(entries)
+        except StopIteration:
+            return
+        except (OSError, PermissionError) as e:
+            on_err("扫描目录迭代中断 %s: %s" % (root, e))
+            return
+
     def recurse(root, rel_prefix):
         # type: (str, str) -> None
         if _cancelled():
@@ -144,7 +167,7 @@ def scan(directory, include=None, exclude=None, self_paths=None, with_hash=False
         except (OSError, PermissionError) as e:
             _scan_err("无法扫描目录 %s: %s" % (root, e))
             return
-        for entry in entries:
+        for entry in _iter_scandir(entries, root, _scan_err):
             if _cancelled():
                 raise ScanCancelled()
             name = entry.name
@@ -192,15 +215,20 @@ def scan(directory, include=None, exclude=None, self_paths=None, with_hash=False
                 if _excluded(rel, name, exclude):
                     continue
                 # 工具保留名：冲突备份只保留在落败方本地，不参与同步/传播；
-                # .tmp~ 为原子复制的临时文件残留（异常中断时可能遗留）
-                if fnmatch.fnmatch(name, "*.conflict-*") or name.endswith(".tmp~"):
+                # .tmp~ 为原子复制的临时文件残留（异常中断时可能遗留）。
+                # 用精确格式匹配备份（*.conflict-* 会误伤 report.conflict-final.docx
+                # 这类真实用户文件）；文件 stat 失败（扫描间隙被删/被锁）是瞬时
+                # 竞态，静默跳过即可，不记入 error_sink 让整个同步中止。
+                if _CONFLICT_BACKUP_RE.search(name) or name.endswith(".tmp~"):
                     continue
                 if not _included(rel, name, include):
                     continue
                 try:
                     st = entry.stat()
+                except FileNotFoundError:
+                    continue  # 扫描间隙文件被删：瞬时竞态，跳过即可
                 except OSError as e:
-                    _scan_err("无法读取文件信息 %s: %s" % (rel, e))
+                    get_logger().debug("无法读取文件信息(跳过) %s: %s" % (rel, e))
                     continue
                 meta = FileMeta(st.st_size, st.st_mtime)
                 if with_hash:
@@ -213,7 +241,7 @@ def scan(directory, include=None, exclude=None, self_paths=None, with_hash=False
                     except Exception:
                         pass
 
-    if not os.path.isdir(directory):
+    if not os.path.isdir(longpath(directory) if is_longpath_supported() else directory):
         get_logger().warn("目录不存在: %s" % directory)
         return result
 

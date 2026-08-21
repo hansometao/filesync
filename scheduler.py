@@ -54,7 +54,13 @@ class Scheduler(object):
 
     def stop(self):
         # type: () -> None
-        # 短停：只置位 + 清 next_run + 短暂等待循环线程退出，不在 GUI 线程做长等待
+        # 短停：置位 + 清 next_run + 等待循环线程完全退出。
+        # 不能用一次性 join(timeout=1)：poll 正被磁盘 I/O（store.save 等）阻塞时
+        # 1 秒内退不出来，stop 返回后该次 _poll_once 仍可能启动新 worker，且可能
+        # 逃逸 wait_workers 的快照（退出流程据此有界 join）——worker 被强杀留
+        # 下半截文件。循环 join 直到线程真正退出（_loop 每 0.1s 检查 _stop，
+        # 正常 0.2s 内退出；上限 3s 防止 GUI 线程被极端 I/O 卡死），
+        # 配合 _poll_once 开头的 _stop 检查，确保 stop 返回后不再有 poll 在跑。
         self._stop = True
         self.running = False
         with self._next_lock:
@@ -62,10 +68,12 @@ class Scheduler(object):
                 t.next_run = None
         th = self._thread
         if th is not None and th.is_alive():
-            try:
-                th.join(timeout=1)
-            except Exception:
-                pass
+            deadline = time.time() + 3
+            while th.is_alive() and time.time() < deadline:
+                try:
+                    th.join(timeout=0.2)
+                except Exception:
+                    break
         self.logger.info("调度器已停止")
 
     def wait_workers(self, timeout=5):
@@ -141,14 +149,13 @@ class Scheduler(object):
         if not task.enabled:
             self.logger.info("任务[%s] 已禁用，run_now 被拒绝" % task.name)
             return False
-        # 审查修复：手动触发前先重置 next_run，让 _poll_once 基于更新后的
-        # last_run 重算（interval 锚定 last_run、daily/weekly 重算未来时刻）。
-        # 若不重置：①停机错过周期后的手动触发会让 next_run 保持过期值，
-        # 任务一完成即被调度器立即再触发一次；②先启动 worker 再重置时，
-        # worker 极快完成且 next_run 仍为过期值，poll 可在重置前再触发一次。
-        # 先重置后启动彻底消除该竞态窗口。
-        with self._next_lock:
-            task.next_run = None
+        # 审查修复：先登记 _running（_lock 内）再重置 next_run（_next_lock）。
+        # 此前顺序相反：重置 next_run 与登记之间存在窗口，poll 读到 None 后
+        # 按过期锚点算出"立即到期"并自行启动 worker（run_now 假返回 False，
+        # 或与手动 worker 并存）。先登记后，poll 在 _lock 内发现任务已在
+        # _running 便不再启动，窗口闭合；next_run 重置用于让 _poll_once 基于
+        # 更新后的 last_run 重算（interval 锚定 last_run、daily/weekly 重算
+        # 未来时刻），避免任务一完成即被调度器再触发一次。
         with self._lock:
             if task_id in self._running:
                 return False
@@ -156,7 +163,19 @@ class Scheduler(object):
             t = threading.Thread(target=self._worker, args=(task_id,),
                                  name="run-%s" % task_id, daemon=True)
             self._active.append(t)   # 先登记再启动，避免线程早于登记结束的竞态
-            t.start()
+            try:
+                t.start()
+            except Exception as e:
+                # 线程创建失败：回滚登记，否则任务永久显示"运行中"且无人收尾
+                self._running.discard(task_id)
+                try:
+                    self._active.remove(t)
+                except ValueError:
+                    pass
+                self.logger.error("任务[%s] 线程启动失败: %s" % (task.name, e))
+                return False
+        with self._next_lock:
+            task.next_run = None
         return True
 
     def _worker(self, task_id):
@@ -257,14 +276,26 @@ class Scheduler(object):
             return
         started = False
         with self._lock:
-            if task.id not in self._running:
+            # enabled 复查在锁内进行：读 task.enabled 未持锁时，GUI 禁用与
+            # poll 触发存在竞态窗口（禁用瞬间仍可能启动最后一次运行）
+            if (task.id not in self._running
+                    and task.enabled and task.schedule.enabled):
                 self._running.add(task.id)
                 t = threading.Thread(
                     target=self._worker, args=(task.id,),
                     name="sched-%s" % task.id, daemon=True)
                 self._active.append(t)
-                t.start()
-                started = True
+                try:
+                    t.start()
+                    started = True
+                except Exception as e:
+                    # 线程创建失败：回滚登记，否则任务永久显示"运行中"且无人收尾
+                    self._running.discard(task.id)
+                    try:
+                        self._active.remove(t)
+                    except ValueError:
+                        pass
+                    self.logger.error("任务[%s] 线程启动失败: %s" % (task.name, e))
         with self._next_lock:
             if started:
                 # 立即推进下次触发时间，避免本周期重复。
@@ -282,11 +313,16 @@ class Scheduler(object):
                 # - interval：周期任务无需在完成后再追跑一次，直接推到"此刻起
                 #   一个完整周期后"，避免 run_now/到点时运行中造成的多余重跑
                 #   （此前固定 +60s，interval 任务完成后 60 秒被自动再触发）；
-                # - daily/weekly：一次性时刻错过即浪费，顺延 60 秒重试补跑。
+                # - daily/weekly：重算**下一个未来计划点**而非滑动 now+60。
+                #   此前 now+60 是滑动锚点：任务运行超过 60s 时每次轮询都把它
+                #   推到更晚，任务完成后 next_run 已过期 -> "完成即重跑"；
+                #   改为从此刻起找下一个计划点后，next_run 必在未来，
+                #   长任务完成后不会立即再触发（错过的一次不补跑，与
+                #   interval 的"运行中不追跑"哲学一致，也消除当日跑两遍）。
                 if task.schedule.type == SCHED_INTERVAL:
                     task.next_run = now + max(1, int(task.schedule.interval_minutes)) * 60
                 else:
-                    task.next_run = now + 60
+                    task.next_run = self._compute_next(task, now + 1)
         if not started:
             self.logger.warn("任务[%s] 正在运行，计划顺延" % task.name)
 

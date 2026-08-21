@@ -120,7 +120,11 @@ class Schedule(object):
         _poll_once 的 for 循环被打断后排在后面的所有任务都得不到轮询。
         清洗原则：类型不对/取值越界就回退默认，坏数据不让调度瘫痪。
         """
-        d = d or {}
+        if not isinstance(d, dict):
+            # 非 dict 真值（如字符串 "abc"）同样防护：d or {} 只拦假值，
+            # 字符串真值会直接 AttributeError（load() 的 except 兜住了，
+            # 但直接调用 from_dict 的用户不应崩溃）
+            d = {}
         stype = d.get("type", SCHED_INTERVAL)
         if stype not in (SCHED_INTERVAL, SCHED_DAILY, SCHED_WEEKLY):
             stype = SCHED_INTERVAL
@@ -212,6 +216,11 @@ class Task(object):
         policy = d.get("conflict_policy", CONFLICT_NEWER)
         if policy not in CONFLICT_POLICIES:
             policy = CONFLICT_NEWER
+        # compare 白名单："auto"/"fast" 之外的值静默按 auto 处理
+        # （否则未知值会让 diff 的 tolerant 判定行为与配置意图不符）
+        compare = d.get("compare", "auto")
+        if compare not in ("auto", "fast"):
+            compare = "auto"
         # include/exclude 元素类型清洗：与 Schedule.times 同理，坏数据（如
         # include=[123]）原样通过会让 scanner 的 fnmatch.fnmatch(pattern=123)
         # 抛 TypeError，导致同步整体失败。仅保留 str 且 strip 后非空的条目。
@@ -231,7 +240,7 @@ class Task(object):
             mode=mode,
             one_way_delete=bool(d.get("one_way_delete", False)),
             two_way_delete=bool(d.get("two_way_delete", False)),
-            compare=d.get("compare", "auto"),
+            compare=compare,
             schedule=Schedule.from_dict(d.get("schedule")),
             include=include,
             exclude=exclude,
@@ -271,30 +280,60 @@ class TaskStore(object):
         # type: (str) -> str
         return os.path.join(self.baseline_dir, task_id + ".json")
 
+    def _atomic_write_json(self, path, obj, indent=None):
+        # type: (str, Any, Optional[int]) -> None
+        """原子写 JSON：先写 tmp 再 os.replace。
+
+        tmp 名带进程号 + 线程号（与 sync_engine._do_copy 同思路）：同一进程内
+        GUI 线程与多个 worker 线程可能并发写不同路径的配置/基线，仅用固定
+        ".tmp" 会让并发写互踩同一 tmp 产生混写（os.replace 原子只保证最终
+        文件完整，不保证 tmp 内容不被交叉写坏）。线程号在同进程内唯一隔离。
+        """
+        tmp = "%s.%d.%d.tmp~" % (path, os.getpid(), threading.get_ident())
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=indent)
+        os.replace(tmp, path)
+
     def save_baseline(self, task):
         # type: (Task) -> None
-        """把 task.baseline 原子写到 config/baseline/<task_id>.json。"""
-        try:
-            if not os.path.isdir(self.baseline_dir):
-                os.makedirs(self.baseline_dir, exist_ok=True)
-            tmp = self._baseline_path(task.id) + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(task.baseline or {}, f, ensure_ascii=False)
-            os.replace(tmp, self._baseline_path(task.id))
-        except OSError as e:
-            _safe_print("保存 baseline 失败: %s" % e)
+        """把 task.baseline 原子写到 config/baseline/<task_id>.json。
+
+        持锁：save_baseline 可能被 GUI 线程（编辑任务）与 worker 线程
+        （同步完成）并发调用，写同一任务的 baseline 文件时必须互斥。
+        """
+        with self._lock:
+            try:
+                if not os.path.isdir(self.baseline_dir):
+                    os.makedirs(self.baseline_dir, exist_ok=True)
+                self._atomic_write_json(self._baseline_path(task.id),
+                                        task.baseline or {})
+            except OSError as e:
+                _safe_print("保存 baseline 失败: %s" % e)
 
     def _load_baseline(self, task):
         # type: (Task) -> None
-        """存在独立 baseline 文件时回填（优先于旧的内嵌格式）。"""
+        """存在独立 baseline 文件时回填（优先于旧的内嵌格式）。
+
+        加载后做结构校验：JSON 合法但形状错误（如 {"a":"b"} 的根、条目
+        不是 dict）会让 diff 的 bl.get("size") 抛 AttributeError 崩掉整个
+        同步，因此非 dict 根 / 非 dict 条目一律丢弃该文件（记录日志）。
+        """
         p = self._baseline_path(task.id)
         if not os.path.exists(p):
             return
         try:
             with open(p, "r", encoding="utf-8") as f:
-                task.baseline = json.load(f) or {}
+                data = json.load(f)
         except (ValueError, OSError):
-            pass
+            return
+        if not isinstance(data, dict):
+            _safe_print("baseline 文件格式错误(已忽略): %s" % p)
+            return
+        bad = [rel for rel, v in data.items() if not isinstance(v, dict)]
+        if bad:
+            _safe_print("baseline 存在非法条目(已忽略 %d 条): %s" % (len(bad), p))
+            data = {k: v for k, v in data.items() if isinstance(v, dict)}
+        task.baseline = data
 
     def _quarantine_corrupt(self):
         # type: () -> bool
@@ -375,15 +414,11 @@ class TaskStore(object):
                     os.makedirs(d, exist_ok=True)
                 # 先写临时文件再原子替换，避免写中途崩溃/断电损坏配置；
                 # 持锁防止 GUI 线程与 worker 线程并发写同一个 .tmp
-                tmp = self.path + ".tmp"
-                with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump(
-                        {"tasks": [t.to_dict() for t in self.tasks]},
-                        f,
-                        ensure_ascii=False,
-                        indent=2,
-                    )
-                os.replace(tmp, self.path)
+                self._atomic_write_json(
+                    self.path,
+                    {"tasks": [t.to_dict() for t in self.tasks]},
+                    indent=2,
+                )
             except OSError as e:
                 _safe_print("保存任务配置失败: %s" % e)
 

@@ -63,8 +63,16 @@ def _draw_icon(size):
 def make_icon(path="app.ico"):
     # type: (str) -> str
     imgs = [_draw_icon(s) for s in SIZES]
+    out_dir = os.path.dirname(os.path.abspath(path))
+    if out_dir and not os.path.isdir(out_dir):
+        os.makedirs(out_dir, exist_ok=True)
     # 以最大尺寸为基准图，其余作为附加尺寸写入同一 .ico（各图保留自身尺寸）
     imgs[-1].save(path, format="ICO", append_images=imgs[:-1])
+    # 校验生成结果确实是一个合法 ICO（可被重新打开），而非静默写坏
+    with open(path, "rb") as f:
+        header = f.read(6)
+    if not (len(header) == 6 and header[:4] == b"\x00\x00\x01\x00"):
+        raise OSError("生成的图标文件无效: %s" % path)
     return os.path.abspath(path)
 
 

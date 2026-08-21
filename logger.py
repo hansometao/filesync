@@ -41,6 +41,14 @@ class AppLogger(object):
                 self._bytes_written = 0
         except OSError:
             self._file = None
+        # 控制台 UTF-8：只配置一次（此前每次 _emit 都尝试 reconfigure，
+        # 每条日志都做一次无用调用；stdout 编码不会在运行期变化）
+        if not quiet:
+            try:
+                if hasattr(sys.stdout, "reconfigure"):
+                    sys.stdout.reconfigure(encoding="utf-8")
+            except Exception:
+                pass
 
     def _reopen(self):
         # type: () -> None
@@ -60,6 +68,15 @@ class AppLogger(object):
         with self._lock:
             self._callbacks.append(cb)
 
+    def remove_callback(self, cb):
+        # type: (Callable[[str, str], None]) -> None
+        """移除回调（避免列表只增不减；当前 GUI 仅 1 个回调，留作通用能力）。"""
+        with self._lock:
+            try:
+                self._callbacks.remove(cb)
+            except ValueError:
+                pass
+
     def _emit(self, level, msg):
         # type: (str, str) -> None
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -74,15 +91,10 @@ class AppLogger(object):
                 cb(level, line)
             except Exception:
                 pass
-        # 控制台：尽量以 UTF-8 输出（GUI 模式 quiet 时跳过，避免终端噪声）
+        # 控制台（GUI 模式 quiet 时跳过，避免终端噪声）；编码已在 __init__ 配置
         if self._quiet:
             return
         try:
-            if hasattr(sys.stdout, "reconfigure"):
-                try:
-                    sys.stdout.reconfigure(encoding="utf-8")
-                except Exception:
-                    pass
             print(line)
         except Exception:
             pass

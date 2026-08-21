@@ -76,6 +76,8 @@ class DiffResult(object):
             self.delete_count += 1
         elif action.kind == "conflict":
             self.conflict_count += 1
+        elif action.kind == "conflict_del":
+            self.conflict_count += 1
         elif action.kind == "extra":
             self.extra_count += 1
         elif action.kind == "mkdir":
@@ -271,6 +273,17 @@ def _reconcile_two(rel, sa, sb, src_snap, dst_snap, sp, dp, task, src_root, dst_
                             cancel_event=cancel_event, tolerant=tolerant):
             return [Action("conflict", rel, "两侧均修改且内容不同", sp, dp, True)]
         return []
+    # 一侧删除、另一侧修改：删除 vs 修改是真实冲突（删除意图与修改意图互相矛盾）。
+    # 若不加区分，removed 会被下方 modified 分支拦截而"无条件恢复修改版"——用户
+    # 删除的文件每次同步都被复活，删除意图永远无法传播，且无备份/计数/提示。
+    # 双向删除开启时改走冲突流程：备份修改侧后按策略决定"传播删除"或"恢复文件"；
+    # 策略无法比较（newer_wins 下删除侧无时间戳）时保守恢复修改版（保留数据）。
+    if (getattr(task, "two_way_delete", False) and sa == "removed"
+            and sb == "modified"):
+        return [Action("conflict_del", rel, "删除(A侧)/修改(B侧)", sp, dp, True)]
+    if (getattr(task, "two_way_delete", False) and sb == "removed"
+            and sa == "modified"):
+        return [Action("conflict_del", rel, "修改(A侧)/删除(B侧)", sp, dp, True)]
     if sa == "modified":
         return [copy_a]
     if sb == "modified":
@@ -408,6 +421,78 @@ def _resolve_conflict(action, policy, on_ask=None):
     return "冲突已解决", False, False
 
 
+def _resolve_del_conflict(action, policy, on_ask=None):
+    # type: (Action, str, Optional[Any]) -> Tuple[str, bool, bool]
+    """处理"一侧删除、另一侧修改"冲突。返回 (结果描述, 是否失败, 是否未解决)。
+
+    删除意图 vs 修改意图互相矛盾，且删除侧无文件、无时间戳可比：
+    - source_wins / target_wins：明确胜出的那一侧决定结果——
+      删除方胜则**先备份修改侧**再删除（不静默丢数据）；修改方胜则把
+      修改版复制回删除侧（恢复文件，视为"内容更新比删除更新"）。
+    - newer_wins：删除侧没有 mtime 可比，保守按"修改方胜"处理（恢复文件），
+      与旧行为一致但显式计数、可被策略覆盖。
+    - skip / ask 回退：不处理，未解决，下次同步重检。
+    """
+    logger = get_logger()
+    a_path = action.from_path  # 源侧路径
+    b_path = action.to_path    # 目标侧路径
+    assert a_path is not None and b_path is not None
+    if policy == CONFLICT_ASK and on_ask is not None:
+        try:
+            got = on_ask(action)
+        except Exception:
+            got = None
+        valid = (CONFLICT_NEWER, CONFLICT_SOURCE, CONFLICT_TARGET, CONFLICT_SKIP)
+        policy = got if got in valid else CONFLICT_SKIP
+    if policy == CONFLICT_SKIP:
+        logger.warn("删除/修改冲突未处理(跳过): %s" % action.rel)
+        return "跳过删除/修改冲突", False, True
+    # 判定哪侧是删除侧：diff 时 removed 侧路径已不存在
+    del_a = not os.path.exists(longpath(a_path))  # 源侧删除？
+    del_b = not os.path.exists(longpath(b_path))  # 目标侧删除？
+    if del_a == del_b:
+        # 两侧都不存在（罕见竞态：冲突判定后又被删）→ 视为已收敛
+        return "删除/修改冲突: 两侧均已消失, 忽略", False, False
+    # 决定删除方是否胜出
+    if policy == CONFLICT_SOURCE:
+        del_wins = del_a
+    elif policy == CONFLICT_TARGET:
+        del_wins = del_b
+    else:  # newer_wins：无删除时间戳可比，保守保留内容（修改方胜）
+        del_wins = False
+    if del_wins:
+        # 删除方胜：先备份修改侧，再删除（传播删除）
+        loser = b_path if del_a else a_path  # 修改侧文件
+        ts = unique_stamp()
+        backup = loser + ".conflict-" + ts
+        seq = 1
+        while os.path.exists(longpath(backup)):
+            backup = loser + ".conflict-" + ts + "-%d" % seq
+            seq += 1
+        try:
+            shutil.copy2(longpath(loser), longpath(backup))
+        except OSError as e:
+            logger.error("删除/修改冲突备份失败，跳过删除 %s: %s" % (loser, e))
+            return "删除/修改冲突处理失败(备份不成,未删除)", True, True
+        try:
+            _do_delete(loser)
+        except OSError as e:
+            logger.error("删除/修改冲突删除失败 %s: %s" % (loser, e))
+            return "删除/修改冲突处理失败", True, True
+        logger.info("删除/修改冲突已解决(删除方胜, 备份:%s): %s" % (backup, action.rel))
+        return "删除/修改冲突已解决(删除方胜,已备份)", False, False
+    # 修改方胜：把修改版复制回删除侧（恢复文件）
+    winner = b_path if del_a else a_path  # 修改侧文件
+    loser = a_path if del_a else b_path   # 删除侧路径（待恢复）
+    try:
+        _do_copy(winner, loser)
+    except OSError as e:
+        logger.error("删除/修改冲突恢复失败 %s: %s" % (loser, e))
+        return "删除/修改冲突处理失败(恢复不成)", True, True
+    logger.info("删除/修改冲突已解决(修改方胜,恢复): %s" % action.rel)
+    return "删除/修改冲突已解决(修改方胜,恢复文件)", False, False
+
+
 def _safe_mtime(path):
     # type: (str) -> Optional[float]
     try:
@@ -469,12 +554,24 @@ def apply_actions(actions, conflict_policy, on_ask=None, cancel_event=None):
                 msg, conflict_failed, unresolved_kept = _resolve_conflict(
                     action, conflict_policy, on_ask)
                 logs.append(msg)
-                if conflict_failed:
+                if conflict_failed or unresolved_kept:
+                    # 未解决（skip/ask 取消/备份失败/覆盖失败）同样计入失败：
+                    # 冲突尚未处理，任务不应误报"成功"（此前 skip 不计 fail）
                     fail += 1
                 if unresolved_kept:
                     unresolved.add(action.rel)
                 elif conflict_failed:
                     # 备份成功但覆盖失败等：两端仍不一致，同样不能进 baseline
+                    failed_rels.add(action.rel)
+            elif action.kind == "conflict_del":
+                msg, conflict_failed, unresolved_kept = _resolve_del_conflict(
+                    action, conflict_policy, on_ask)
+                logs.append(msg)
+                if conflict_failed or unresolved_kept:
+                    fail += 1
+                if unresolved_kept:
+                    unresolved.add(action.rel)
+                elif conflict_failed:
                     failed_rels.add(action.rel)
             elif action.kind == "extra":
                 logs.append("[保留] %s" % action.rel)
@@ -520,7 +617,7 @@ def _dst_dirty_rels(actions, src_root, dst_root):
             dirty.add(act.rel)
         elif act.kind == "delete" and in_dst:
             dirty.add(act.rel)
-        elif act.kind == "conflict":
+        elif act.kind == "conflict" or act.kind == "conflict_del":
             # 冲突解决可能覆盖任一侧；该条目统一重扫，代价极小
             dirty.add(act.rel)
     return dirty
@@ -537,9 +634,12 @@ def build_baseline_after(task, dst_root, self_paths=None, snap=None,
       仅对它们直接 stat 取真实状态（含删除后消失的条目），不做全量重扫。
     - old_baseline：旧 baseline；size/mtime 与快照一致的条目直接沿用其哈希
       （内容不可能变化），把全量哈希降为"仅变更文件"。
-    - exclude_rels：未解决冲突的条目**不写入**（旧的也不保留）。这样下次
-      两侧都判 added -> 重新进入冲突流程；否则 baseline 记住落败方现状后，
-      冲突会"退化"成一次无备份的单侧覆盖（静默丢数据）。
+    - exclude_rels：失败/未解决冲突的条目**保留旧 baseline 条目**而非整条剔除。
+      失败意味着目标侧未被改动（复制/删除/冲突解决都没写成），旧 baseline 记录的
+      恰是目标侧当前真实状态；整条剔除会让下次两侧都判 added（升级为人工冲突），
+      且在 target_wins 策略下把本应 A->B 的重试反转成 B->A 覆盖。保留后下次按
+      "源 modified / 目标 same"重试原方向；两侧都变则重新进入冲突流程。
+      若旧 baseline 无该条目（如新增文件复制失败），保持不写，下次判 added 重试。
     - 目录条目（is_dir=True）不写入 baseline：目录只做创建/合并，不做内容比对，
       写入只会污染双向同步的 classify。
     - cancel_event：置位时经 scan/hash_file 抛 ScanCancelled，重建可被取消。
@@ -583,6 +683,12 @@ def build_baseline_after(task, dst_root, self_paths=None, snap=None,
         if h is not None:
             entry["hash"] = h
         base[rel] = entry
+    # 失败/未解决条目保留旧 baseline（见 docstring 说明）：目标侧没写成，
+    # 旧条目即其真实状态，下次按"哪侧相对旧状态变化"重新判定，方向不反转。
+    for rel in exclude:
+        old = old_baseline.get(rel)
+        if old is not None and rel not in base:
+            base[rel] = dict(old)
     return base
 
 
@@ -682,6 +788,15 @@ def perform_sync(task, logger=None, conflict_override=None, dry_run=False,
     dst_snap = scan(dst_root, include=task.include, exclude=task.exclude,
                     self_paths=self_paths, with_hash=False, progress=progress,
                     cancel_event=cancel_event, error_sink=dst_errors)
+    # C1 防线二（目标空根）：目标根**存在但扫描为空**（全新空盘/空挂载/目录被清空）
+    # 而 baseline 非空——diff 会把 baseline 内全部条目判成 removed，配合
+    # two_way_delete 生成"删除(A 侧)"动作，**误删源文件**（与"目标根缺失"同型
+    # 风险）。仅当双向删除传播开启时拦截：单向镜像（one_way）下目标空盘是
+    # "重新全量同步"的合法场景，不能误伤；双向但不传播删除时也无删除动作。
+    if (task.mode == MODE_TWO_WAY and getattr(task, "two_way_delete", False)
+            and task.baseline and not dst_snap and os.path.isdir(longpath(dst_root))):
+        return _abort("目标目录为空但已有同步记录，可能目标盘被更换/清空，"
+                      "已中止以防误删源侧: %s" % dst_root)
     # C1 防线二：任一侧扫描有错误（如子目录权限被拒）时快照不完整，diff
     # 会把缺失条目判成 removed，配合删除传播即误删对侧。宁可失败重试。
     scan_errors = src_errors + dst_errors

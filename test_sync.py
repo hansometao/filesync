@@ -763,12 +763,19 @@ res22b = scan(s22, exclude=["*.tmp"])
 check("sub/d.tmp" not in res22b and "a.txt" in res22b, "scan: exclude 过滤排除匹配文件")
 res22c = scan(s22, self_paths=[os.path.join(s22, "sub")])
 check("sub/c.txt" not in res22c, "scan: self_paths 排除指定目录")
-# 保留名不参与扫描
-write(os.path.join(s22, "keep.conflict-abc"), "x")
+# 保留名不参与扫描（冲突备份用精确时间戳格式匹配；非时间戳的
+# "xxx.conflict-abc" 是真实用户文件，不再被宽泛的 *.conflict-* 误排）
+write(os.path.join(s22, "keep.conflict-20260821-120000.123"), "x")
+write(os.path.join(s22, "keep.conflict-20260821-120000.123-2"), "x")
+write(os.path.join(s22, "user.conflict-final.docx"), "x")
 write(os.path.join(s22, "res.tmp~"), "x")
 res22d = scan(s22)
-check("keep.conflict-abc" not in res22d and "res.tmp~" not in res22d,
-      "scan: .conflict-* 与 .tmp~ 保留名跳过")
+check("keep.conflict-20260821-120000.123" not in res22d
+      and "keep.conflict-20260821-120000.123-2" not in res22d
+      and "res.tmp~" not in res22d,
+      "scan: .conflict-<时间戳> 与 .tmp~ 保留名跳过")
+check("user.conflict-final.docx" in res22d,
+      "scan: 非时间戳 .conflict- 文件名不被误排(真实用户文件)")
 # 取消事件
 import threading as _thr
 ev = _thr.Event()
@@ -1709,6 +1716,197 @@ try:
           "fast: baseline 容差内微差免哈希判 same(双向)")
 finally:
     _sync_engine.hash_file = _orig_hash34
+
+# ---------- 35. 第三轮修复回归: 删除vs修改冲突 / 空根防线 / 失败记账 / skip计失败 ----------
+print("[35] 第三轮修复回归")
+from config import CONFLICT_SKIP, CONFLICT_TARGET, Task as _Task35
+from scanner import scan as _scan35, _CONFLICT_BACKUP_RE as _re35
+from utils.timeutil import prev_daily_time as _prev_daily35
+
+# --- 35a. 一侧删除、另一侧修改 -> conflict_del(不再是静默恢复/删除) ---
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src"); dst = os.path.join(d, "dst")
+os.makedirs(src); os.makedirs(dst)
+t = fresh_task(MODE_TWO_WAY, src, dst)
+t.two_way_delete = True
+write(os.path.join(src, "f.txt"), "v1")
+perform_sync(t)
+os.remove(os.path.join(src, "f.txt"))
+write(os.path.join(dst, "f.txt"), "v2-modified")
+os.utime(os.path.join(dst, "f.txt"), (2000000000, 2000000000))  # 确保 mtime 不同
+res = perform_sync(t, dry_run=True)
+kinds = [a.kind for a in res["diff"].actions]
+check(kinds == ["conflict_del"], "35a: A删B改 检出 conflict_del(而非静默动作)")
+check(res["diff"].conflict_count == 1, "35a: conflict_del 计入冲突计数")
+perform_sync(t)  # 默认 newer_wins -> 修改方胜, 恢复文件
+check(os.path.exists(os.path.join(src, "f.txt")),
+      "35a: newer_wins 下修改方胜, 文件恢复到源侧")
+check(open(os.path.join(src, "f.txt")).read() == "v2-modified",
+      "35a: 恢复内容为修改版")
+check(perform_sync(t, dry_run=True)["diff"].is_empty(), "35a: 再次同步收敛")
+
+# --- 35b. source_wins + 源侧删除 -> 删除方胜: 备份修改侧后删除 ---
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src"); dst = os.path.join(d, "dst")
+os.makedirs(src); os.makedirs(dst)
+t = fresh_task(MODE_TWO_WAY, src, dst, conflict_policy=CONFLICT_SOURCE)
+t.two_way_delete = True
+write(os.path.join(src, "g.txt"), "v1")
+perform_sync(t)
+os.remove(os.path.join(src, "g.txt"))
+write(os.path.join(dst, "g.txt"), "v2")
+os.utime(os.path.join(dst, "g.txt"), (2000000000, 2000000000))
+perform_sync(t)
+check(not os.path.exists(os.path.join(src, "g.txt")), "35b: 删除方胜, 源侧不复活")
+check(not os.path.exists(os.path.join(dst, "g.txt")), "35b: 删除方胜, 目标侧已删")
+check(any("g.txt.conflict-" in x for x in os.listdir(dst)),
+      "35b: 删除前修改侧已备份(.conflict- 副本)")
+
+# --- 35c. 目标侧防线: 双向+传播删除+目标空根+非空baseline -> 中止, 源侧不误删 ---
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src"); dst = os.path.join(d, "dst")
+os.makedirs(src); os.makedirs(dst)
+t = fresh_task(MODE_TWO_WAY, src, dst)
+t.two_way_delete = True
+write(os.path.join(src, "f.txt"), "data")
+perform_sync(t)
+check(bool(t.baseline), "35c 前置: 首次同步建立 baseline")
+for x in os.listdir(dst):
+    os.remove(os.path.join(dst, x))  # 模拟换盘/清空目标根
+res = perform_sync(t)
+check(res.get("aborted") is True, "35c: 目标空根+非空baseline 中止(防误删源侧)")
+check(t.last_status == "失败", "35c: 任务状态置'失败'")
+check(os.path.exists(os.path.join(src, "f.txt")), "35c: 源侧文件未被误删")
+
+# --- 35d. 单向+目标空盘 -> 合法重新全量同步(不误伤) ---
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src"); dst = os.path.join(d, "dst")
+os.makedirs(src); os.makedirs(dst)
+t = fresh_task(MODE_ONE_WAY, src, dst)
+t.one_way_delete = True
+write(os.path.join(src, "f.txt"), "data")
+perform_sync(t)
+for x in os.listdir(dst):
+    os.remove(os.path.join(dst, x))
+res = perform_sync(t)
+check(not res.get("aborted"), "35d: 单向目标空盘不中止")
+check(os.path.exists(os.path.join(dst, "f.txt")), "35d: 重新全量同步成功")
+
+# --- 35e. 失败记账: 复制失败后保留旧baseline, 下次重试方向不反转 ---
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src"); dst = os.path.join(d, "dst")
+os.makedirs(src); os.makedirs(dst)
+t = fresh_task(MODE_TWO_WAY, src, dst, conflict_policy=CONFLICT_TARGET)
+t.two_way_delete = True
+write(os.path.join(src, "f.txt"), "v1")
+perform_sync(t)
+write(os.path.join(src, "f.txt"), "v2")
+os.utime(os.path.join(src, "f.txt"), (2000000000, 2000000000))
+_orig_copy35 = _sync_engine._do_copy
+def _fail_copy35(frm, to):
+    if os.path.basename(to) == "f.txt":
+        raise OSError("模拟复制失败")
+    return _orig_copy35(frm, to)
+_sync_engine._do_copy = _fail_copy35
+try:
+    res = perform_sync(t)
+finally:
+    _sync_engine._do_copy = _orig_copy35
+check("f.txt" in t.baseline, "35e: 复制失败条目保留旧 baseline(不整条剔除)")
+res2 = perform_sync(t)
+check(open(os.path.join(dst, "f.txt")).read() == "v2",
+      "35e: 重试方向仍为 A->B(未在 target_wins 下反转 B->A)")
+check(perform_sync(t, dry_run=True)["diff"].is_empty(), "35e: 收敛")
+
+# --- 35f. CONFLICT_SKIP 计入 fail(冲突未处理不误报'成功') ---
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src"); dst = os.path.join(d, "dst")
+os.makedirs(src); os.makedirs(dst)
+t = fresh_task(MODE_TWO_WAY, src, dst, conflict_policy=CONFLICT_SKIP)
+t.two_way_delete = True
+write(os.path.join(src, "c.txt"), "src-content-longer")
+write(os.path.join(dst, "c.txt"), "dst-content")
+res = perform_sync(t)
+check(t.last_status == "部分失败", "35f: skip 冲突置'部分失败'(不误报成功)")
+check(res["fail_count"] == 1, "35f: skip 冲突计入 fail_count")
+check("c.txt" not in t.baseline, "35f: skip 冲突不写 baseline")
+# 正常解决冲突不误伤
+d = tempfile.mkdtemp()
+src = os.path.join(d, "src"); dst = os.path.join(d, "dst")
+os.makedirs(src); os.makedirs(dst)
+t = fresh_task(MODE_TWO_WAY, src, dst)
+t.two_way_delete = True
+write(os.path.join(src, "c.txt"), "src-content-longer")
+os.utime(os.path.join(src, "c.txt"), (1700000400, 1700000400))
+write(os.path.join(dst, "c.txt"), "dst-content")
+os.utime(os.path.join(dst, "c.txt"), (1700000400, 1700000400))
+res = perform_sync(t)
+check(t.last_status == "成功" and res["fail_count"] == 0,
+      "35f: 正常解决冲突不计 fail(回归)")
+
+# --- 35g. scanner: 嵌套尾斜杠目录模式 / .conflict- 精确匹配 / stat 降级 ---
+d = tempfile.mkdtemp()
+root = os.path.join(d, "root")
+os.makedirs(os.path.join(root, "foo", "bar"))
+write(os.path.join(root, "a.txt"), "x")
+write(os.path.join(root, "foo", "bar", "b.txt"), "y")
+write(os.path.join(root, "report.conflict-final.docx"), "真实文件")
+res = _scan35(root, exclude=["foo/bar/"])
+check("foo/bar/b.txt" not in res, "35g: 嵌套尾斜杠目录模式生效")
+check("a.txt" in res, "35g: 普通文件不受影响")
+res2 = _scan35(root)
+check("report.conflict-final.docx" in res2, "35g: .conflict- 不误伤真实用户文件")
+check(_re35.search("x.txt.conflict-20260821-120000.123"), "35g: 精确备份格式仍被识别")
+check(not _re35.search("report.conflict-final.docx"), "35g: 非时间戳格式不误匹配")
+
+# --- 35h. config: from_dict 非 dict 防护 / compare 白名单 / baseline 结构校验 ---
+from config import Schedule as _Sched35, TaskStore as _Store35, Task as _Task35b
+s35 = _Sched35.from_dict("abc")
+check(s35.interval_minutes == 60, "35h: Schedule.from_dict(非dict) 回退默认")
+t35 = _Task35b.from_dict({"name": "x", "compare": "bogus"})
+check(t35.compare == "auto", "35h: compare 白名单外回退 auto")
+d = tempfile.mkdtemp()
+st35 = _Store35(os.path.join(d, "tasks.json"))
+tk35 = _Task35b(name="t", source="/s", target="/t", mode=MODE_ONE_WAY)
+st35.add(tk35)
+bp35 = st35._baseline_path(tk35.id)
+os.makedirs(os.path.dirname(bp35), exist_ok=True)
+with open(bp35, "w", encoding="utf-8") as f:
+    json.dump({"ok.txt": {"size": 1, "mtime": 1.0, "hash": "h"},
+               "bad.txt": "not-a-dict"}, f)
+st35._load_baseline(tk35)
+check("ok.txt" in tk35.baseline and "bad.txt" not in tk35.baseline,
+      "35h: baseline 结构校验剔除非法条目")
+
+# --- 35i. scheduler: daily 运行中顺延重算未来计划点(不滑动 now+60) ---
+from utils.timeutil import now_epoch as _now35
+d = tempfile.mkdtemp()
+st35i = _Store35(os.path.join(d, "tasks.json"))
+t35i = _Task35b(name="d", source="/s", target="/t", mode=MODE_ONE_WAY)
+t35i.schedule.enabled = True
+t35i.schedule.type = "daily"
+t35i.schedule.times = ["08:00"]
+st35i.add(t35i)
+from scheduler import Scheduler as _Sched35i
+sched35 = _Sched35i(st35i, lambda tk: {"changed": False, "fail_count": 0})
+sched35.start()
+sched35.acquire(t35i.id)  # 模拟任务运行中
+with sched35._next_lock:
+    t35i.next_run = _now35()
+sched35._poll_task(t35i, _now35() + 1)
+with sched35._next_lock:
+    nxt35 = t35i.next_run
+sched35.release(t35i.id)
+sched35.stop()
+check(nxt35 is not None and nxt35 > _now35(),
+      "35i: daily 运行中顺延到未来计划点(完成即重跑已消除)")
+
+# --- 35j. prev_daily_time 回看窗口扩大到 8 天(停机补跑判定) ---
+import time as _time35
+now35 = _time35.mktime(_time35.strptime("2026-08-21 12:00:00", "%Y-%m-%d %H:%M:%S"))
+p35 = _prev_daily35(["08:00"], now35 - 6 * 86400)
+check(p35 is not None, "35j: 停机 6 天仍能判定错过触发(窗口 8 天)")
+check(_prev_daily35([], now35) is None, "35j: 空 times 返回 None")
 
 # ---------- 清理 ----------
 print("\n结果：%s" % ("全部通过" if not failures else "%d 项失败" % len(failures)))

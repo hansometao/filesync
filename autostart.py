@@ -183,10 +183,16 @@ def _mac_enable(home, args):
         import plistlib
         path = _mac_path(home)
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        # StandardOut/ErrorPath：自启进程的 stdout/stderr 落到固定日志文件，
+        # 否则 launchd 捕获的输出不可见，启动失败无从排查
+        log_dir = os.path.join(home, "Library", "Logs")
+        os.makedirs(log_dir, exist_ok=True)
         data = {
             "Label": _MAC_LABEL,
             "ProgramArguments": args,
             "RunAtLoad": True,
+            "StandardOutPath": os.path.join(log_dir, "FolderSync.log"),
+            "StandardErrorPath": os.path.join(log_dir, "FolderSync.log"),
         }
         with open(path, "wb") as f:
             plistlib.dump(data, f)
