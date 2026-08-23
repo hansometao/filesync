@@ -24,7 +24,7 @@ jobs:
           python-version: ${{ matrix.python }}
 
       - name: 编译检查（全部模块，含 type-comment 语法校验）
-        run: python -m py_compile main.py config.py scheduler.py scanner.py sync_engine.py logger.py gui_app.py gui_diff.py gui_task_dialog.py utils/paths.py utils/timeutil.py build_exe.py make_icon.py tray.py autostart.py
+        run: python -m py_compile main.py config.py scheduler.py scanner.py sync_engine.py logger.py gui_app.py gui_workers.py gui_tray.py gui_close.py gui_diff.py gui_task_dialog.py utils/paths.py utils/timeutil.py build_exe.py make_icon.py tray.py autostart.py
 
       - name: 运行无头自测（52 节标题 / 298 项断言）
         run: python test_sync.py
@@ -46,4 +46,4 @@ jobs:
         run: pip install "mypy==1.14.1"
 
       - name: mypy 严格类型检查
-        run: mypy --config-file mypy.ini main.py config.py scheduler.py scanner.py sync_engine.py logger.py gui_app.py gui_task_dialog.py gui_diff.py utils/paths.py utils/timeutil.py tray.py autostart.py build_exe.py make_icon.py
+        run: mypy --config-file mypy.ini main.py config.py scheduler.py scanner.py sync_engine.py logger.py gui_app.py gui_workers.py gui_tray.py gui_close.py gui_task_dialog.py gui_diff.py utils/paths.py utils/timeutil.py tray.py autostart.py build_exe.py make_icon.py

@@ -6,14 +6,14 @@ Verification order (matches CI in `.github/workflows/ci.yml`):
 
 ```bash
 # 1. Compile check (all modules, incl. type-comment syntax)
-python -m py_compile main.py config.py scheduler.py scanner.py sync_engine.py logger.py gui_app.py gui_diff.py gui_task_dialog.py utils/paths.py utils/timeutil.py build_exe.py make_icon.py tray.py autostart.py
+python -m py_compile main.py config.py scheduler.py scanner.py sync_engine.py logger.py gui_app.py gui_workers.py gui_tray.py gui_close.py gui_diff.py gui_task_dialog.py utils/paths.py utils/timeutil.py build_exe.py make_icon.py tray.py autostart.py
 
 # 2. Headless self-test (plain script, NOT pytest; exits 1 on failure)
 python test_sync.py
 
 # 3. Type check (mypy pinned to 1.14.1 — last version supporting Python 3.8 target)
 pip install "mypy==1.14.1"
-mypy --config-file mypy.ini main.py config.py scheduler.py scanner.py sync_engine.py logger.py gui_app.py gui_task_dialog.py gui_diff.py utils/paths.py utils/timeutil.py tray.py autostart.py build_exe.py make_icon.py
+mypy --config-file mypy.ini main.py config.py scheduler.py scanner.py sync_engine.py logger.py gui_app.py gui_workers.py gui_tray.py gui_close.py gui_task_dialog.py gui_diff.py utils/paths.py utils/timeutil.py tray.py autostart.py build_exe.py make_icon.py
 ```
 
 - `test_sync.py` uses a custom `check()` with one function per numbered section (`test_N()`); run the whole file (`python test_sync.py`). Section functions are also pytest-collectible, but pytest is not a dependency — the plain-script runner is canonical.

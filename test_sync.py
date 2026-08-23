@@ -2317,6 +2317,48 @@ def test_37_ui_review_fixes():
     assert len(failures) == _fail_base, "test_37_ui_review_fixes: 本节有断言失败"
 
 
+# ---------- 38. 结构断言: App 混入拆分 ----------
+def test_38_app_split_structure():
+    # type: () -> None
+    """自测节 38. App 拆分为 SyncFlow/TrayMenu/CloseSeq 三混入"""
+    global _gw38, _gt38, _gc38
+    _fail_base = len(failures)
+    print("[38] 结构: App 混入拆分")
+    import gui_workers as _gw38
+    import gui_tray as _gt38
+    import gui_close as _gc38
+
+    check(issubclass(_appmod37.App, (_gw38.SyncFlowMixin,
+                                     _gt38.TrayMenuMixin,
+                                     _gc38.CloseSeqMixin)),
+          "38: App 继承三个职责混入")
+    for m in ("_on_sync_now", "_on_diff_ready", "_apply_worker",
+              "_show_wait", "_hide_wait", "_popup_if_alive"):
+        check(hasattr(_gw38.SyncFlowMixin, m),
+              "38: SyncFlowMixin.%s 在位" % m)
+    for m in ("_build_menu", "_init_tray", "_hide_to_background",
+              "_restore_from_tray", "_request_quit", "_on_unmap"):
+        check(hasattr(_gt38.TrayMenuMixin, m),
+              "38: TrayMenuMixin.%s 在位" % m)
+    for m in ("on_close", "_finish_close", "_join_workers_bounded"):
+        check(hasattr(_gc38.CloseSeqMixin, m),
+              "38: CloseSeqMixin.%s 在位" % m)
+    # 核心层保留项：UI 队列与常驻界面不随混人迁移
+    for m in ("__init__", "_build_ui", "_refresh_tasks", "_ui_put",
+              "_drain_ui_queue", "_tick", "_run_task"):
+        check(m in _appmod37.App.__dict__,
+              "38: App 核心层保留 %s" % m)
+    # MRO 身份断言：跨混入方法调用必须解析到真实现，
+    # 而非类型占位（类级赋值占位会按 MRO 遮蔽后位混入的方法）
+    check(_appmod37.App.on_close is _gc38.CloseSeqMixin.on_close,
+          "38: on_close 解析到 CloseSeqMixin 真实现")
+    check(_appmod37.App._hide_to_background is _gt38.TrayMenuMixin._hide_to_background,
+          "38: _hide_to_background 解析到 TrayMenuMixin 真实现")
+    check(_appmod37.App._hide_wait is _gw38.SyncFlowMixin._hide_wait,
+          "38: _hide_wait 解析到 SyncFlowMixin 真实现")
+    assert len(failures) == _fail_base, "test_38_app_split_structure: 本节有断言失败"
+
+
 # ---------- 节内助手（提升到模块级；调用发生在测试运行期） ----------
 def _sched_run(task):
     # type: (Task) -> None
@@ -2504,7 +2546,7 @@ class _FakeLog35l(object):
         _got35l.append(m)
 
 
-TESTS = [test_1, test_2, test_3_run_now, test_2b_D_mtime, test_3b, test_3c_interval_last_run, test_4, test_5_save, test_6_M4, test_7_2s, test_8_M10_baseline, test_9_L4, test_10_CLI_run_cli, test_11_S1_SE1, test_12_include, test_13_interval_next_run, test_14_run_now, test_15_daily, test_16_logger, test_17, test_18_config_baseline, test_19_GUI, test_20_utils_paths, test_21_utils_timeutil, test_22_scanner, test_23_config_Task, test_24_logger_close, test_25_GUI_mock, test_26_run_now_next_run, test_27_fail_count, test_28_mkdir_type_conflict, test_29_F4_interval, test_30_F5_daily, test_31_F6_baseline, test_32_C1_C2, test_33_tray_autostart, test_34_fast_FAT32, test_35_vs_skip, test_36_refactor_regress, test_37_ui_review_fixes]
+TESTS = [test_1, test_2, test_3_run_now, test_2b_D_mtime, test_3b, test_3c_interval_last_run, test_4, test_5_save, test_6_M4, test_7_2s, test_8_M10_baseline, test_9_L4, test_10_CLI_run_cli, test_11_S1_SE1, test_12_include, test_13_interval_next_run, test_14_run_now, test_15_daily, test_16_logger, test_17, test_18_config_baseline, test_19_GUI, test_20_utils_paths, test_21_utils_timeutil, test_22_scanner, test_23_config_Task, test_24_logger_close, test_25_GUI_mock, test_26_run_now_next_run, test_27_fail_count, test_28_mkdir_type_conflict, test_29_F4_interval, test_30_F5_daily, test_31_F6_baseline, test_32_C1_C2, test_33_tray_autostart, test_34_fast_FAT32, test_35_vs_skip, test_36_refactor_regress, test_37_ui_review_fixes, test_38_app_split_structure]
 
 if __name__ == "__main__":
     import traceback
