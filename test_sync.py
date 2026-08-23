@@ -1975,6 +1975,64 @@ d._on_save()
 check(_err_box_calls == [] and d.result is not None,
       "35k: 目标目录存在时不弹确认框（原行为不变）")
 
+# --- 35l. 第五轮修复回归: 持久层告警入日志 / id 清洗与去重 / 原子写 fsync ---
+print("[35l] 回归: 持久层告警入日志 / id 清洗与去重 / 原子写 fsync")
+import config as _cfg35l
+import logger as _logger_mod35l
+
+# G1: _safe_print 双通道——stdout 之外必须进入日志通道（GUI quiet/windowed
+# exe 下 stdout 不可见甚至不存在，baseline 写失败等告警否则彻底丢失）
+_orig_gl35l = _logger_mod35l.get_logger
+_got35l = []
+
+
+class _FakeLog35l(object):
+    def warn(self, m):
+        # type: (str) -> None
+        _got35l.append(m)
+
+
+_logger_mod35l.get_logger = lambda: _FakeLog35l()
+try:
+    _cfg35l._safe_print("G1 观测性告警测试")
+finally:
+    _logger_mod35l.get_logger = _orig_gl35l
+check(len(_got35l) == 1 and "G1 观测性告警测试" in _got35l[0],
+      "35l: _safe_print 告警同步写入日志通道（G1）")
+
+# G2: from_dict 的 id 类型清洗（非 str/空 id 会让 _baseline_path 的
+# 字符串拼接与 --list 的 t.id[:8] 切片崩溃）
+check(isinstance(_Task35b.from_dict({"id": 123}).id, str)
+      and len(_Task35b.from_dict({"id": 123}).id) == 32,
+      "35l: 非 str id 替换为 uuid hex（G2）")
+check(_Task35b.from_dict({"id": ""}).id != "",
+      "35l: 空 id 重新生成（G2）")
+check(_Task35b.from_dict({"id": "keep-me"}).id == "keep-me",
+      "35l: 合法 str id 原样保留（G2）")
+
+# G3: 手编配置重复 id——加载时为副本重新生成，任务数不减、GUI iid 不再冲突
+d35l = tempfile.mkdtemp()
+p35l = os.path.join(d35l, "tasks.json")
+_dup35l = {"id": "dup-id-35l", "name": "n", "source": "s", "target": "t"}
+with open(p35l, "w", encoding="utf-8") as f:
+    json.dump({"tasks": [dict(_dup35l), dict(_dup35l)]}, f)
+_st35l = _Store35(p35l)
+check(len(_st35l.tasks) == 2
+      and _st35l.tasks[0].id == "dup-id-35l"
+      and _st35l.tasks[1].id != "dup-id-35l",
+      "35l: 重复 id 加载时副本重新生成且任务数不减（G3）")
+
+# G4: 原子写 JSON 在 os.replace 前 fsync（断电防半截新文件）
+_calls35l = []
+_orig_fsync35l = os.fsync
+os.fsync = lambda fd: _calls35l.append(fd)
+try:
+    _st35l.save()
+finally:
+    os.fsync = _orig_fsync35l
+check(len(_calls35l) >= 1,
+      "35l: _atomic_write_json 在 replace 前 fsync（G4）")
+
 # ---------- 清理 ----------
 print("\n结果：%s" % ("全部通过" if not failures else "%d 项失败" % len(failures)))
 if failures:

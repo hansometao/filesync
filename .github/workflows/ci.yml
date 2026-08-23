@@ -26,7 +26,7 @@ jobs:
       - name: 编译检查（全部模块，含 type-comment 语法校验）
         run: python -m py_compile main.py config.py scheduler.py scanner.py sync_engine.py logger.py gui_app.py gui_diff.py gui_task_dialog.py utils/paths.py utils/timeutil.py build_exe.py make_icon.py tray.py autostart.py
 
-      - name: 运行无头自测（50 节标题 / 286 项断言）
+      - name: 运行无头自测（51 节标题 / 292 项断言）
         run: python test_sync.py
 
   mypy:

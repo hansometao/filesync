@@ -241,8 +241,15 @@ class Task(object):
         if not isinstance(raw_bl, dict):
             raw_bl = {}
         baseline = dict((k, v) for k, v in raw_bl.items() if isinstance(v, dict))
+        # id 必须是非空 str：手编配置出现数字等非 str id 时若原样通过，
+        # _baseline_path 的 task_id + ".json" 会抛 TypeError（save_baseline
+        # 只捕 OSError，异常会冲出 load()/finalize_sync），--list 的
+        # t.id[:8] 切片同样崩；空/非法 id 一律重新生成（旧格式无 id 的
+        # 任务本就走这条路径）
+        raw_id = d.get("id")
+        task_id = raw_id if isinstance(raw_id, str) and raw_id else uuid.uuid4().hex
         return cls(
-            id=d.get("id") or uuid.uuid4().hex,
+            id=task_id,
             name=d.get("name", "") if isinstance(d.get("name"), str) else "",
             source=d.get("source", "") if isinstance(d.get("source"), str) else "",
             target=d.get("target", "") if isinstance(d.get("target"), str) else "",
@@ -264,9 +271,21 @@ class Task(object):
 
 def _safe_print(msg):
     # type: (str) -> None
-    """pythonw 无控制台时 sys.stdout 为 None，print 会抛异常；安全输出。"""
+    """持久层告警的双通道输出：stdout + 日志文件（尽力而为，绝不抛异常）。
+
+    仅打 stdout 在生产环境不可见：GUI quiet 模式抑制控制台；windowed 打包
+    （pythonw/无控制台 exe）下 sys.stdout 为 None，print 直接抛异常被吞——
+    baseline 写失败、配置损坏隔离等关键告警用户将无从察觉。因此再尽力写入
+    foldersync.log：logger 不反向依赖本模块（仅依赖 utils.paths），无循环
+    导入；get_logger 未初始化时兜底建 cwd/logs，与 scanner 等模块行为一致。
+    """
     try:
         print(msg)
+    except Exception:
+        pass
+    try:
+        from logger import get_logger
+        get_logger().warn(msg)
     except Exception:
         pass
 
@@ -301,6 +320,13 @@ class TaskStore(object):
         tmp = "%s.%d.%d.tmp~" % (path, os.getpid(), threading.get_ident())
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(obj, f, ensure_ascii=False, indent=indent)
+            # 断电防护：flush+fsync 强制数据落盘后再 os.replace。部分文件
+            # 系统（ext4 延迟分配等）在断电时可能留下空/半截的替换后新文件，
+            # 配置/基线丢失会让双向同步退化为全量冲突。写入频率为每次任务
+            # 完成/配置变更一次，fsync 开销可忽略。仅 fsync 文件本身：
+            # 目录项持久化需 fsync 目录，Windows 无可移植做法，从简。
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
 
     def save_baseline(self, task):
@@ -430,6 +456,17 @@ class TaskStore(object):
             self.tasks = []
             _safe_print("加载任务配置失败(已保留损坏副本): %s" % e)
             return
+        # 手编配置可能出现重复 id：GUI 任务列表以 id 作 Treeview iid，
+        # 重复会使 _refresh_tasks 的 insert 抛 TclError，列表刷新中断；
+        # store.get 也只会命中第一个。为重复的后续副本重新生成 id——
+        # 其 baseline 关联随之失效，下次同步按首同步语义重分类
+        # （同内容 no-op；异内容走冲突流程先备份后覆盖，不丢数据）。
+        seen_ids = set()  # type: set
+        for t in self.tasks:
+            if t.id in seen_ids:
+                _safe_print("任务[%s] 存在重复 id，已为该副本重新生成" % t.name)
+                t.id = uuid.uuid4().hex
+            seen_ids.add(t.id)
         # baseline：独立文件优先；旧内嵌格式自动迁移为独立文件
         migrated = False
         for t in self.tasks:
