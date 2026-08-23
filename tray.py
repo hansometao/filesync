@@ -46,6 +46,8 @@ NIM_SETVERSION = 0x00000004
 NIF_MESSAGE = 0x00000001
 NIF_ICON = 0x00000002
 NIF_TIP = 0x00000004
+NIF_INFO = 0x00000010
+NIIF_INFO = 0x00000001
 NOTIFYICON_VERSION = 0x00000003
 
 MF_STRING = 0x00000000
@@ -274,6 +276,29 @@ class TrayIcon(object):
                 if h:
                     return h, True
         return user32.LoadIconW(None, IDI_APPLICATION), False
+
+    def notify(self, title, msg):
+        # type: (str, str) -> None
+        """托盘气泡通知（NIM_MODIFY + NIF_INFO，Win7 经典 balloon）。
+
+        尽力而为：图标未创建成功/已销毁/调用失败均静默返回（气泡只是
+        可见性增强，失败不应影响主流程）。文本超长按 API 上限截断。
+        """
+        if self._nid is None:
+            return
+        try:
+            nid = self._nid
+            nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_INFO
+            nid.szInfo = msg[:255]
+            nid.szInfoTitle = title[:63]
+            nid.dwInfoFlags = NIIF_INFO
+            getattr(ctypes, "windll").shell32.Shell_NotifyIconW(
+                NIM_MODIFY, ctypes.byref(nid))
+        except Exception as e:
+            try:
+                self.logger.warn("托盘气泡通知失败: %s" % e)
+            except Exception:
+                pass
 
     def destroy(self):
         # type: () -> None

@@ -36,6 +36,20 @@ _KIND_LABEL = {
 }
 
 
+def deletion_warning_text(delete_count, rmdir_count=0):
+    # type: (int, int) -> Optional[str]
+    """删除类动作的强化警示文案；无删除时返回 None。
+
+    引擎侧已有空根/扫描不完整等误删防线，这里是 UI 层的二次防线：
+    预览确认前把"将删除 N 项"从摘要行里提出来醒目展示。纯函数，
+    无 tkinter 依赖，可无头测试。
+    """
+    n = delete_count + rmdir_count
+    if n <= 0:
+        return None
+    return "注意：本次将删除 %d 个文件/目录，请核对下方清单后再确认执行" % n
+
+
 class DiffDialog(tk.Toplevel):
     def __init__(self, parent, diff_result, task):
         # type: (tk.Misc, DiffResult, Task) -> None
@@ -58,6 +72,10 @@ class DiffDialog(tk.Toplevel):
         info = "待执行动作（共 %d 项）：%s" % (len(self.diff.actions), self.diff.summary())
         has_conflict = bool(self.diff.conflict_count or self.diff.type_conflict_count)
         ttk.Label(frm, text=info, foreground="#b00" if has_conflict else "#333").pack(anchor=tk.W, pady=(0, 6))
+        # 删除类动作强化警示（与冲突红色提示并列的二次防线）
+        del_warn = deletion_warning_text(self.diff.delete_count, self.diff.rmdir_count)
+        if del_warn:
+            ttk.Label(frm, text=del_warn, foreground="#b00").pack(anchor=tk.W)
 
         cols = ("tag", "kind", "rel", "detail")
         # 差异列表可能上千条：Treeview + 垂直滚动条，保证可滚动查看全部

@@ -353,6 +353,22 @@ def _prune_empty_dirs(path, root):
             break
 
 
+def _unique_backup(loser):
+    # type: (str) -> str
+    """为落败方生成不冲突的备份路径（与原文件同目录）。
+
+    毫秒级时间戳 + 序号，避免同秒多个冲突互相覆盖。命名格式被
+    scanner._CONFLICT_BACKUP_RE 精确匹配（备份只留本地、不参与同步）。
+    """
+    ts = unique_stamp()
+    backup = loser + ".conflict-" + ts
+    seq = 1
+    while os.path.exists(longpath(backup)):
+        backup = loser + ".conflict-" + ts + "-%d" % seq
+        seq += 1
+    return backup
+
+
 def _resolve_conflict(action, policy, on_ask=None):
     # type: (Action, str, Optional[Any]) -> Tuple[str, bool, bool]
     """处理冲突。返回 (结果描述, 是否失败, 是否未解决)。
@@ -396,13 +412,8 @@ def _resolve_conflict(action, policy, on_ask=None):
             winner, loser = b_path, a_path
         else:
             winner, loser = a_path, b_path  # mtime 平局取源侧
-    # 备份落败方（与原文件同目录）。毫秒级时间戳 + 序号，避免同秒多个冲突互相覆盖
-    ts = unique_stamp()
-    backup = loser + ".conflict-" + ts
-    seq = 1
-    while os.path.exists(longpath(backup)):
-        backup = loser + ".conflict-" + ts + "-%d" % seq
-        seq += 1
+    # 备份落败方（与原文件同目录）
+    backup = _unique_backup(loser)
     try:
         shutil.copy2(longpath(loser), longpath(backup))
     except OSError as e:
@@ -463,12 +474,7 @@ def _resolve_del_conflict(action, policy, on_ask=None):
     if del_wins:
         # 删除方胜：先备份修改侧，再删除（传播删除）
         loser = b_path if del_a else a_path  # 修改侧文件
-        ts = unique_stamp()
-        backup = loser + ".conflict-" + ts
-        seq = 1
-        while os.path.exists(longpath(backup)):
-            backup = loser + ".conflict-" + ts + "-%d" % seq
-            seq += 1
+        backup = _unique_backup(loser)
         try:
             shutil.copy2(longpath(loser), longpath(backup))
         except OSError as e:

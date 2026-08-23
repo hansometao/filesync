@@ -22,7 +22,7 @@ from config import (
     Task, TaskStore, MODE_ONE_WAY, MODE_TWO_WAY, CONFLICT_ASK,
     sync_identity_changed,
 )
-from scheduler import Scheduler
+from scheduler import Scheduler, join_threads_bounded
 from sync_engine import perform_sync, apply_diff, finalize_sync
 from scanner import ScanCancelled
 from logger import init_logger
@@ -30,6 +30,7 @@ from utils.paths import longpath, app_dir
 from utils.timeutil import format_epoch
 import autostart
 import tray as tray_mod
+from main import APP_VERSION
 
 APP_DIR = app_dir()
 LOG_DIR = os.path.join(APP_DIR, "logs")
@@ -132,7 +133,7 @@ class App(object):
     # ---------- UI 构建 ----------
     def _build_ui(self):
         # type: () -> None
-        self.root.title("文件夹同步备份工具  v1.1")
+        self.root.title("文件夹同步备份工具  v%s" % APP_VERSION)
         self.root.geometry("900x620")
 
         top = ttk.Frame(self.root)
@@ -168,6 +169,8 @@ class App(object):
         self.tree.column("next", width=130)
         self.tree.column("status", width=90)
         self.tree.column("last", width=130)
+        # 右键快捷菜单：单任务启用/禁用（免进编辑对话框）
+        self.tree.bind("<Button-3>", self._on_task_context_menu)
 
         self._status_label = ttk.Label(self.root, text="调度器：已停止", foreground="#333")
         self._status_label.pack(anchor=tk.W, padx=8)
@@ -289,6 +292,55 @@ class App(object):
             self.scheduler.release(task.id)
 
     # ---------- 同步预览/执行 ----------
+    def _on_task_context_menu(self, event):
+        # type: (object) -> None
+        """任务列表右键菜单：选中行 + 启用/禁用切换。
+
+        与编辑路径同协议：先占运行槽再改字段，避免与调度器并发
+        （禁用瞬间正在运行的任务由引擎锁内 enabled 复查兜底）。
+        """
+        iid = self.tree.identify_row(event.y)  # type: ignore[attr-defined]
+        if not iid:
+            return
+        task = self.store.get(iid)
+        if task is None:
+            return
+        try:
+            self.tree.selection_set(iid)
+        except tk.TclError:
+            pass
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(
+            label="禁用任务" if task.enabled else "启用任务",
+            command=lambda: self._toggle_task_enabled(task.id))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)  # type: ignore[attr-defined]
+        finally:
+            menu.grab_release()
+
+    def _toggle_task_enabled(self, task_id):
+        # type: (str) -> None
+        """切换任务启用状态并持久化（运行槽协议与 _on_edit 一致）。"""
+        task = self.store.get(task_id)
+        if task is None:
+            return
+        if not self.scheduler.acquire(task.id):
+            messagebox.showinfo("提示", "该任务正在运行中，请等待完成后再%s" %
+                                ("禁用" if task.enabled else "启用"))
+            return
+        try:
+            task.enabled = not task.enabled
+            # 与编辑路径一致：先置空 next_run 再 update 发布，调度器按新
+            # 状态重算下次触发（禁用后不再轮询；重新启用按既有 last_run
+            # 锚点判定是否补跑）
+            task.next_run = None
+            self.store.update(task)
+            self.logger.info("任务[%s] 已%s" % (
+                task.name, "启用" if task.enabled else "禁用"))
+        finally:
+            self.scheduler.release(task.id)
+        self._refresh_tasks(full=True)
+
     def _start_worker(self, target, args=()):
         # type: (Callable[..., Any], Any) -> bool
         """启动并登记手动同步 worker（见 _workers 注释）。返回是否启动成功。
@@ -398,6 +450,13 @@ class App(object):
         恢复窗口即可查看。
         """
         if self._closing or self._tray_hidden:
+            # 托盘隐藏态（非退出期）：气泡通知兜底，用户不恢复窗口也能
+            # 感知同步结果；退出期进程将销毁，仅落日志。
+            if self._tray_hidden and not self._closing and self._tray is not None:
+                try:
+                    self._tray.notify(title, msg)
+                except Exception:
+                    pass
             self.logger.info("[托盘隐藏态/退出期] %s: %s" % (title, msg))
             return
         if kind == "info":
@@ -440,13 +499,14 @@ class App(object):
                 # 不能因 diff 为空而误报"无需同步（无差异）"
                 self._release_manual(task.id)
                 self._refresh_tasks(full=False)
-                messagebox.showerror("错误", "同步已中止：%s" % task.last_summary)
+                # 托盘隐藏态/退出期不弹不可见模态框（与 worker 路径同一守卫）
+                self._popup_if_alive("error", "错误", "同步已中止：%s" % task.last_summary)
                 return
             if res["diff"].is_empty():
                 # 无差异：无需确认，直接收尾（所见即所得——0 个动作无可执行）
                 self._release_manual(task.id)
                 self._refresh_tasks(full=False)
-                messagebox.showinfo("提示", "无需同步（无差异）")
+                self._popup_if_alive("info", "提示", "无需同步（无差异）")
                 return
             from gui_diff import DiffDialog
             dlg = DiffDialog(self.root, res["diff"], task)
@@ -465,7 +525,7 @@ class App(object):
             if dlg.result_policy == "_noop_":
                 self._release_manual(task.id)
                 self._refresh_tasks(full=False)
-                messagebox.showinfo("提示", "无需同步（无差异）")
+                self._popup_if_alive("info", "提示", "无需同步（无差异）")
                 return
             policy = dlg.result_policy if dlg.result_policy != CONFLICT_ASK else None
             self._cancel.clear()  # 确保已确认的执行为干净运行，不被残留取消标志秒变 no-op
@@ -484,7 +544,7 @@ class App(object):
             except Exception:
                 pass
             try:
-                messagebox.showerror("错误", "操作失败：%s" % e)
+                self._popup_if_alive("error", "错误", "操作失败：%s" % e)
             except Exception:
                 pass
             self._refresh_tasks(full=False)
@@ -849,17 +909,9 @@ class App(object):
         # 手动同步 worker（diff/apply）同样有界等待：此前仅等调度
         # worker，手动线程游离在 wait_workers 之外，进程退出时被强杀，
         # 大文件复制中途被杀会留下半截 .tmp~ 残留
-        deadline = time.time() + 5
         with self._workers_lock:
             workers = list(self._workers)
-        for th in workers:
-            remain = deadline - time.time()
-            if remain <= 0:
-                break
-            try:
-                th.join(timeout=remain)
-            except Exception:
-                pass
+        join_threads_bounded(workers, 5)
 
     def on_close(self):
         # type: () -> None

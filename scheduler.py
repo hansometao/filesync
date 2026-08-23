@@ -20,6 +20,25 @@ from utils.timeutil import (
 from logger import get_logger
 
 
+def join_threads_bounded(threads, timeout):
+    # type: (List[threading.Thread], float) -> None
+    """有界等待一组线程结束：总时限 timeout 秒，逐个 join 剩余时间。
+
+    供退出流程使用（调度 worker / 手动同步 worker），保证进程退出前
+    写盘线程有机会完成，同时不无限阻塞 GUI。单个 join 抛异常按已结束
+    处理，不中断后续等待。
+    """
+    deadline = time.time() + timeout
+    for th in threads:
+        remain = deadline - time.time()
+        if remain <= 0:
+            break
+        try:
+            th.join(timeout=remain)
+        except Exception:
+            pass
+
+
 class Scheduler(object):
     def __init__(self, store, run_task, logger=None):
         # type: (Any, Callable[[Task], None], Any) -> None
@@ -79,17 +98,9 @@ class Scheduler(object):
     def wait_workers(self, timeout=5):
         # type: (float) -> None
         """有界等待运行中的工作线程结束（仅供退出流程在后台线程调用）。"""
-        deadline = time.time() + timeout
         with self._lock:
             threads = list(self._active)
-        for th in threads:
-            remain = deadline - time.time()
-            if remain <= 0:
-                break
-            try:
-                th.join(timeout=remain)
-            except Exception:
-                pass
+        join_threads_bounded(threads, timeout)
 
     def is_task_running(self, task_id):
         # type: (str) -> bool

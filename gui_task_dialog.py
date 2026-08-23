@@ -10,7 +10,7 @@ from config import (
     validate_schedule_input,
     CONFLICT_NEWER, POLICY_LABELS,
 )
-from typing import Optional
+from typing import List, Optional
 
 # 下拉框显示中文标签，保存/加载时与内部值双向映射
 # （冲突策略标签统一取自 config.POLICY_LABELS，与差异预览对话框共用一份）
@@ -19,6 +19,79 @@ _SCHED_LABELS = {SCHED_INTERVAL: "间隔定时", SCHED_DAILY: "每日时刻", SC
 _MODE_REV = {v: k for k, v in _MODE_LABELS.items()}
 _SCHED_REV = {v: k for k, v in _SCHED_LABELS.items()}
 _POLICY_REV = {v: k for k, v in POLICY_LABELS.items()}
+
+
+# ---------- 纯校验/解析函数（无 tkinter 依赖，GUI 与无头测试共用） ----------
+
+def validate_task_name(name):
+    # type: (str) -> Optional[str]
+    """任务名非空校验。返回错误消息；None 表示合法。"""
+    if not name:
+        return "请填写任务名称"
+    return None
+
+
+def find_dup_task_name(tasks, name, own_id):
+    # type: (Optional[list], str, Optional[str]) -> Optional[str]
+    """在 tasks 中查找与 name 同名且非 own_id 的任务，返回重名任务名。
+
+    任务名查重：任务列表、日志审计与 CLI --sync 都按名称辨认任务，
+    同名会让"按名称执行/排查"命中错误任务。编辑时排除自身（own_id）。
+    tasks 为 None（测试注入的 fake store 无该属性）时不查重。
+    """
+    for t in (tasks or []):
+        if t.name == name and t.id != own_id:
+            return name
+    return None
+
+
+def validate_dir_pair(src, dst):
+    # type: (str, str) -> Optional[str]
+    """源/目标路径结构校验：不相同、不互为子目录（调用方先保证非空）。
+
+    L8/M-8：相同或互为子目录会导致自我递归复制。用 normcase 三值比对：
+    Windows 下大小写不同的同一/父子路径也不漏判。commonpath 对不同盘符
+    抛 ValueError，此时不可能互为子路径。返回错误消息；None 表示合法。
+    """
+    asrc = os.path.normcase(os.path.abspath(src))
+    adst = os.path.normcase(os.path.abspath(dst))
+    if asrc == adst:
+        return "源目录与目标目录不能相同"
+    try:
+        common = os.path.normcase(os.path.commonpath([asrc, adst]))
+        if common in (asrc, adst):
+            return "源目录与目标目录不能互为子目录（会导致自我递归复制）"
+    except ValueError:
+        pass  # Windows 不同盘符等，不可能互为子路径
+    return None
+
+
+def parse_interval_minutes(text, fallback):
+    # type: (str, int) -> int
+    """解析间隔(分钟)。非法时回退 fallback（新建默认 60 / 编辑沿用原值），
+    保证 Schedule.interval_minutes 始终有效；格式合法性由
+    validate_schedule_input 在 interval 类型下先行保证。"""
+    try:
+        return int(text)
+    except ValueError:
+        return fallback
+
+
+def parse_weekdays_text(text):
+    # type: (str) -> List[int]
+    """解析周几输入（逗号分隔 1-7）。weekly 启用时 validate_schedule_input
+    已保证全为数字；daily/interval/未启用时该栏残留的垃圾输入（如 "abc"）
+    不经过校验，此处防御性忽略非法值，绝不因无关字段崩溃。"""
+    weekdays = []  # type: List[int]
+    for w in text.split(","):
+        w = w.strip()
+        if not w:
+            continue
+        try:
+            weekdays.append(int(w))
+        except ValueError:
+            pass
+    return weekdays
 
 
 class TaskDialog(tk.Toplevel):
@@ -158,42 +231,36 @@ class TaskDialog(tk.Toplevel):
         name = self._name.get().strip()
         src = self._src.get().strip()
         dst = self._dst.get().strip()
-        if not name:
-            messagebox.showerror("错误", "请填写任务名称")
+        # 校验逻辑抽为纯函数（无 tkinter 依赖，可无头测试），此处仅负责
+        # 按原顺序弹错误框展示。
+        err = validate_task_name(name)
+        if err:
+            messagebox.showerror("错误", err)
             return
-        # 任务名查重：任务列表、日志审计与 CLI --sync 都按名称辨认任务，
-        # 同名会让"按名称执行/排查"命中错误任务。编辑时排除自身。
+        # 任务名查重：编辑时排除自身（见 find_dup_task_name 注释）
         if self.store is not None:
             own_id = None
             if not self.is_new and self.task is not None:
                 own_id = self.task.id
-            for t in getattr(self.store, "tasks", None) or []:
-                if t.name == name and t.id != own_id:
-                    messagebox.showerror("错误", "已存在同名任务：%s（名称需唯一）" % name)
-                    return
+            dup = find_dup_task_name(
+                getattr(self.store, "tasks", None), name, own_id)
+            if dup is not None:
+                messagebox.showerror("错误", "已存在同名任务：%s（名称需唯一）" % dup)
+                return
         if not src or not dst:
             messagebox.showerror("错误", "请选择源目录与目标目录")
             return
+        # 源目录必须存在（引擎对不可达源会中止同步）；目标目录允许不存在——
+        # 首次同步自动创建是引擎的合法场景，确认一次以防手滑拼错路径
         if not os.path.isdir(src):
             messagebox.showerror("错误", "源目录不存在：%s" % src)
             return
         # L8/M-8：源/目标不能相同或互为子目录（否则自我递归复制）。
-        # 结构校验先于存在性确认：路径本身非法时没必要先问"是否创建"。
-        # 用 normcase 三值比对：Windows 下大小写不同的同一/父子路径也不漏判。
-        asrc = os.path.normcase(os.path.abspath(src))
-        adst = os.path.normcase(os.path.abspath(dst))
-        if asrc == adst:
-            messagebox.showerror("错误", "源目录与目标目录不能相同")
+        # 结构校验先于目标侧存在性确认：路径本身非法时没必要先问"是否创建"。
+        err = validate_dir_pair(src, dst)
+        if err:
+            messagebox.showerror("错误", err)
             return
-        try:
-            common = os.path.normcase(os.path.commonpath([asrc, adst]))
-            if common in (asrc, adst):
-                messagebox.showerror("错误", "源目录与目标目录不能互为子目录（会导致自我递归复制）")
-                return
-        except ValueError:
-            pass  # Windows 不同盘符等，不可能互为子路径
-        # 源目录必须存在（引擎对不可达源会中止同步）；目标目录允许不存在——
-        # 首次同步自动创建是引擎的合法场景，确认一次以防手滑拼错路径
         if not os.path.isdir(dst):
             if not messagebox.askyesno(
                     "提示",
@@ -215,29 +282,16 @@ class TaskDialog(tk.Toplevel):
         # 校验已保证格式合法，按既有逻辑解析（times/weekdays 为空时得到空列表）。
         # 间隔栏仅 interval 类型被校验为整数；其他类型可为空/非法，
         # 沿用原任务值（新建默认 60），保证 Schedule.interval_minutes 始终有效
-        try:
-            interval = int(self._interval.get())
-        except ValueError:
-            if self.is_new:
-                interval = 60
-            else:
-                assert self.task is not None
-                interval = self.task.schedule.interval_minutes
+        if self.is_new:
+            fallback = 60
+        else:
+            assert self.task is not None
+            fallback = self.task.schedule.interval_minutes
+        interval = parse_interval_minutes(self._interval.get(), fallback)
         times = [t.strip() for t in self._times.get().split(",") if t.strip()]
         include = [t.strip() for t in self._include.get().split(",") if t.strip()]
         exclude = [t.strip() for t in self._exclude.get().split(",") if t.strip()]
-        # 周几解析：weekly 启用时 validate_schedule_input 已保证全为 1-7 数字；
-        # 但 daily/interval/未启用时该栏残留的垃圾输入（如 "abc"）不会经过校验，
-        # 此处防御性忽略非法值（与 interval 栏的兜底一致），绝不因无关字段崩溃
-        weekdays = []
-        for w in self._weekdays.get().split(","):
-            w = w.strip()
-            if not w:
-                continue
-            try:
-                weekdays.append(int(w))
-            except ValueError:
-                pass
+        weekdays = parse_weekdays_text(self._weekdays.get())
 
         if self.is_new:
             t = Task()
