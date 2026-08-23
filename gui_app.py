@@ -269,13 +269,28 @@ class App(object):
 
     # ---------- 同步预览/执行 ----------
     def _start_worker(self, target, args=()):
-        # type: (Callable[..., Any], Any) -> None
-        """启动并登记手动同步 worker（见 _workers 注释）。"""
+        # type: (Callable[..., Any], Any) -> bool
+        """启动并登记手动同步 worker（见 _workers 注释）。返回是否启动成功。
+
+        t.start() 可能因系统线程资源耗尽抛异常：此时回滚 _workers 登记
+        并返回 False，由调用方释放运行槽/门闩——与 scheduler 的同类回滚
+        一致，否则任务永久显示"运行中"且手动同步全局锁死。
+        """
         t = threading.Thread(target=self._worker_wrapper, args=(target, args),
                              daemon=True)
         with self._workers_lock:
             self._workers.append(t)
-        t.start()
+        try:
+            t.start()
+        except Exception as e:
+            with self._workers_lock:
+                try:
+                    self._workers.remove(t)
+                except ValueError:
+                    pass
+            self.logger.error("同步 worker 线程启动失败: %s" % e)
+            return False
+        return True
 
     def _worker_wrapper(self, target, args):
         # type: (Callable[..., Any], Any) -> None
@@ -323,12 +338,20 @@ class App(object):
             self._prog_count = 0
             self._last_prog_ts = 0.0
             self._show_wait("正在扫描并对比差异...", cancellable=True)
+            # 线程启动失败（资源耗尽等）同样必须回滚运行槽与门闩，
+            # 否则任务永久"运行中"且手动同步门闩锁死
+            if not self._start_worker(self._diff_worker, (task,)):
+                raise RuntimeError("同步线程启动失败")
         except Exception as e:
-            # 等待窗创建失败时必须释放运行槽与门闩，否则任务永久"运行中"
-            self.logger.error("打开等待窗失败: %s" % e)
+            # 等待窗创建失败/线程启动失败时必须释放运行槽与门闩，否则任务永久"运行中"
+            self.logger.error("启动手动同步失败: %s" % e)
+            try:
+                self._hide_wait()
+            except Exception:
+                pass
             self._release_manual(task.id)
+            self._popup_if_alive("error", "错误", "启动同步失败：%s" % e)
             return
-        self._start_worker(self._diff_worker, (task,))
 
     def _progress_cb(self, rel):
         # type: (str) -> None
@@ -426,7 +449,9 @@ class App(object):
             policy = dlg.result_policy if dlg.result_policy != CONFLICT_ASK else None
             self._cancel.clear()  # 确保已确认的执行为干净运行，不被残留取消标志秒变 no-op
             self._show_wait("正在执行同步...", cancellable=True)
-            self._start_worker(self._apply_worker, (task, res, policy))
+            if not self._start_worker(self._apply_worker, (task, res, policy)):
+                # 抛给下方 except 统一收尾：释放运行槽 + 关等待窗 + 报错
+                raise RuntimeError("同步执行线程启动失败")
         except Exception as e:
             self.logger.error("预览/执行准备异常 [%s]: %s" % (task.name, e))
             try:
@@ -796,6 +821,25 @@ class App(object):
         except tk.TclError:
             pass
 
+    def _join_workers_bounded(self):
+        # type: () -> None
+        """有界等待调度 worker 与手动同步 worker 结束（退出流程用）。"""
+        self.scheduler.wait_workers(5)
+        # 手动同步 worker（diff/apply）同样有界等待：此前仅等调度
+        # worker，手动线程游离在 wait_workers 之外，进程退出时被强杀，
+        # 大文件复制中途被杀会留下半截 .tmp~ 残留
+        deadline = time.time() + 5
+        with self._workers_lock:
+            workers = list(self._workers)
+        for th in workers:
+            remain = deadline - time.time()
+            if remain <= 0:
+                break
+            try:
+                th.join(timeout=remain)
+            except Exception:
+                pass
+
     def on_close(self):
         # type: () -> None
         """窗口关闭按钮（X）：未置退出标志时转后台运行，否则完整关闭。"""
@@ -820,24 +864,21 @@ class App(object):
         def _shutdown():
             # type: () -> None
             try:
-                self.scheduler.wait_workers(5)
-                # 手动同步 worker（diff/apply）同样有界等待：此前仅等调度
-                # worker，手动线程游离在 wait_workers 之外，进程退出时被强杀，
-                # 大文件复制中途被杀会留下半截 .tmp~ 残留
-                deadline = time.time() + 5
-                with self._workers_lock:
-                    workers = list(self._workers)
-                for th in workers:
-                    remain = deadline - time.time()
-                    if remain <= 0:
-                        break
-                    try:
-                        th.join(timeout=remain)
-                    except Exception:
-                        pass
+                self._join_workers_bounded()
             finally:
                 self._ui_put(self._finish_close)
-        threading.Thread(target=_shutdown, daemon=True).start()
+        try:
+            threading.Thread(target=_shutdown, daemon=True).start()
+        except Exception as e:
+            # 收尾线程起不来（极端资源耗尽）：当前线程内联有界收尾兜底，
+            # 保证 _finish_close 必达。窗口已 withdraw，阻塞至多约 10 秒
+            # 无交互可被打断；不走 _ui_put——内联执行期间主循环被占，
+            # 队列里的 _finish_close 得不到消费
+            self.logger.error("关闭收尾线程启动失败，改为内联收尾: %s" % e)
+            try:
+                self._join_workers_bounded()
+            finally:
+                self._finish_close()
 
     def _finish_close(self):
         # type: () -> None

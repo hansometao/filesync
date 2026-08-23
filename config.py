@@ -11,6 +11,7 @@ import json
 import re
 import shutil
 import threading
+import time
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -232,6 +233,14 @@ class Task(object):
         exclude = [x.strip() for x in raw_exc
                    if isinstance(x, str) and x.strip()] \
             if isinstance(raw_exc, list) else []
+        # 内嵌旧格式 baseline 结构清洗：非 dict 根 / 非 dict 条目一律丢弃，
+        # 与独立 baseline 文件加载（_load_baseline）的校验对齐。坏条目若原样
+        # 通过，diff 的 bl.get("size") 会抛 AttributeError 使该任务同步失败；
+        # 文件路径在重启后会被结构校验自愈，内嵌路径此前没有同等防线。
+        raw_bl = d.get("baseline", {})
+        if not isinstance(raw_bl, dict):
+            raw_bl = {}
+        baseline = dict((k, v) for k, v in raw_bl.items() if isinstance(v, dict))
         return cls(
             id=d.get("id") or uuid.uuid4().hex,
             name=d.get("name", "") if isinstance(d.get("name"), str) else "",
@@ -248,7 +257,7 @@ class Task(object):
             last_run=last_run,
             last_status=d.get("last_status", "") if isinstance(d.get("last_status"), str) else "",
             last_summary=d.get("last_summary", "") if isinstance(d.get("last_summary"), str) else "",
-            baseline=d.get("baseline", {}) or {},
+            baseline=baseline,
             enabled=bool(d.get("enabled", True)),
         )
 
@@ -359,16 +368,50 @@ class TaskStore(object):
             _safe_print("配置损坏现场保留失败（保持只读保护）: %s" % e)
             return False
 
+    def _cleanup_stale_tmp(self):
+        # type: () -> None
+        """清理原子写临时文件的崩溃残留（config/ 与 baseline/ 目录）。
+
+        tmp 命名为 "<name>.<pid>.<tid>.tmp~"，进程在写出 tmp 与 os.replace
+        之间被杀时会遗留。load() 在启动期调用，本进程尚未开始任何写入，
+        存量 .tmp~ 必为残留。仅删除修改时间超过 1 小时的文件：更晚的可能是
+        另一个并发进程实例正在写入的 tmp，误删会使其 os.replace 失败
+        （该次保存丢失，已有数据不受影响），但仍以不碰为宜。
+        同时兼容清理旧版固定命名 "<tasks.json>.tmp"。
+        """
+        cutoff = time.time() - 3600
+
+        def sweep(d):
+            # type: (str) -> None
+            try:
+                names = os.listdir(d)
+            except OSError:
+                return
+            for fn in names:
+                if not fn.endswith(".tmp~"):
+                    continue
+                fp = os.path.join(d, fn)
+                try:
+                    if os.path.getmtime(fp) < cutoff:
+                        os.remove(fp)
+                except OSError:
+                    pass
+
+        sweep(os.path.dirname(os.path.abspath(self.path)))
+        if os.path.isdir(self.baseline_dir):
+            sweep(self.baseline_dir)
+        legacy = self.path + ".tmp"
+        try:
+            if os.path.exists(legacy):
+                os.remove(legacy)
+        except OSError:
+            pass
+
     def load(self):
         # type: () -> None
         self._load_failed = False
-        # 此时 self.path 仍是上一次的完好版本，删 tmp 无副作用。
-        try:
-            tmp = self.path + ".tmp"
-            if os.path.exists(tmp):
-                os.remove(tmp)
-        except OSError:
-            pass
+        # 清理上次运行崩溃遗留的原子写临时文件（含旧版固定命名，见方法注释）
+        self._cleanup_stale_tmp()
         if not os.path.exists(self.path):
             self.tasks = []
             return

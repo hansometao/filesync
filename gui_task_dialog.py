@@ -177,10 +177,8 @@ class TaskDialog(tk.Toplevel):
         if not os.path.isdir(src):
             messagebox.showerror("错误", "源目录不存在：%s" % src)
             return
-        if not os.path.isdir(dst):
-            messagebox.showerror("错误", "目标目录不存在：%s" % dst)
-            return
         # L8/M-8：源/目标不能相同或互为子目录（否则自我递归复制）。
+        # 结构校验先于存在性确认：路径本身非法时没必要先问"是否创建"。
         # 用 normcase 三值比对：Windows 下大小写不同的同一/父子路径也不漏判。
         asrc = os.path.normcase(os.path.abspath(src))
         adst = os.path.normcase(os.path.abspath(dst))
@@ -194,6 +192,13 @@ class TaskDialog(tk.Toplevel):
                 return
         except ValueError:
             pass  # Windows 不同盘符等，不可能互为子路径
+        # 源目录必须存在（引擎对不可达源会中止同步）；目标目录允许不存在——
+        # 首次同步自动创建是引擎的合法场景，确认一次以防手滑拼错路径
+        if not os.path.isdir(dst):
+            if not messagebox.askyesno(
+                    "提示",
+                    "目标目录不存在，首次同步时将自动创建：\n%s\n\n继续吗？" % dst):
+                return
 
         # 调度输入校验：interval/times/weekdays 抽为纯函数 validate_schedule_input
         # （无 tkinter 依赖，可无头测试），此处仅负责错误弹窗展示。

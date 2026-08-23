@@ -931,8 +931,14 @@ _fake_tk.filedialog = _fake_fd
 _err_box_calls = []
 def _fake_showerror(*a, **k):
     _err_box_calls.append(a)
+_ask_calls = []
+def _fake_askyesno(*a, **k):
+    # 默认拒绝（保守）：目标目录不存在的确认框需测试显式覆写应答
+    _ask_calls.append(a)
+    return False
 _fake_mb = _types.ModuleType("tkinter.messagebox")
 _fake_mb.showerror = _fake_showerror
+_fake_mb.askyesno = _fake_askyesno
 _fake_tk.messagebox = _fake_mb
 _sys.modules["tkinter"] = _fake_tk
 _sys.modules["tkinter.ttk"] = _fake_ttk
@@ -1907,6 +1913,67 @@ now35 = _time35.mktime(_time35.strptime("2026-08-21 12:00:00", "%Y-%m-%d %H:%M:%
 p35 = _prev_daily35(["08:00"], now35 - 6 * 86400)
 check(p35 is not None, "35j: 停机 6 天仍能判定错过触发(窗口 8 天)")
 check(_prev_daily35([], now35) is None, "35j: 空 times 返回 None")
+
+# --- 35k. 第四轮修复回归: 内嵌 baseline 清洗 / 崩溃 tmp 残留清理 / 目标不存在可保存 ---
+print("[35k] 回归: 内嵌 baseline 清洗 / tmp 残留清理 / 目标目录自动创建")
+
+# F2: Task.from_dict 内嵌旧格式 baseline 的结构清洗（与文件加载校验对齐）
+t35k = _Task35b.from_dict({
+    "name": "x",
+    "baseline": {"ok.txt": {"size": 1, "mtime": 1.0}, "bad": "not-a-dict"},
+})
+check("ok.txt" in t35k.baseline and "bad" not in t35k.baseline,
+      "35k: 内嵌 baseline 非 dict 条目被剔除")
+check(_Task35b.from_dict({"baseline": "junk"}).baseline == {},
+      "35k: 内嵌 baseline 非 dict 根回退空")
+
+# F3: 崩溃残留 .pid.tid.tmp~ 在 load() 时被清理（config 与 baseline 目录 + 旧命名）
+d35k = tempfile.mkdtemp()
+p35k = os.path.join(d35k, "tasks.json")
+with open(p35k, "w", encoding="utf-8") as f:
+    json.dump({"tasks": []}, f)
+stale35k = p35k + ".111.222.tmp~"
+fresh35k = p35k + ".333.444.tmp~"
+legacy35k = p35k + ".tmp"
+old35k = time.time() - 7200
+for fp in (stale35k, fresh35k, legacy35k):
+    open(fp, "w").close()
+    os.utime(fp, (old35k, old35k))
+os.utime(fresh35k, (time.time(), time.time()))  # 新文件视为并发实例在写
+os.makedirs(os.path.join(d35k, "baseline"))
+bstale35k = os.path.join(d35k, "baseline", "abc.json.555.666.tmp~")
+open(bstale35k, "w").close()
+os.utime(bstale35k, (old35k, old35k))
+_Store35(p35k)  # 构造即触发 load() -> _cleanup_stale_tmp()
+check(not os.path.exists(stale35k), "35k: 超过 1 小时的 tasks.json tmp 残留被清理")
+check(not os.path.exists(legacy35k), "35k: 旧版固定命名 .tmp 残留被清理")
+check(not os.path.exists(bstale35k), "35k: baseline 目录 tmp 残留被清理")
+check(os.path.exists(fresh35k), "35k: 1 小时内的 tmp 不误删（可能是并发实例在写）")
+
+# F4: 目标目录不存在 -> askyesno 确认后允许保存（引擎首跑自动创建）
+_fake_mb.askyesno = lambda *a, **k: _ask_calls.append(a) or True
+_ask_calls[:] = []
+d = _mk_dialog()
+d._dst = _FakeEntry(os.path.join(d25, "new-target"))
+d._on_save()
+check(len(_ask_calls) == 1 and d.result is not None
+      and d.result.target == os.path.abspath(os.path.join(d25, "new-target")),
+      "35k: 目标目录不存在经确认后保存（首跑自动创建语义）")
+
+_fake_mb.askyesno = lambda *a, **k: _ask_calls.append(a) or False
+_ask_calls[:] = []
+d = _mk_dialog()
+d._dst = _FakeEntry(os.path.join(d25, "nope"))
+d._on_save()
+check(len(_ask_calls) == 1 and d.result is None,
+      "35k: 目标目录不存在且拒绝确认时不保存")
+
+_err_box_calls[:] = []
+d = _mk_dialog()
+d._dst = _FakeEntry(dst25)
+d._on_save()
+check(_err_box_calls == [] and d.result is not None,
+      "35k: 目标目录存在时不弹确认框（原行为不变）")
 
 # ---------- 清理 ----------
 print("\n结果：%s" % ("全部通过" if not failures else "%d 项失败" % len(failures)))
