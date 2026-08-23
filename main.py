@@ -92,6 +92,10 @@ def run_cli(argv, app_dir=None):
 
     if app_dir is None:
         app_dir = _app_dir_fn()
+    # 先于 TaskStore 初始化日志：持久层告警（配置损坏隔离/baseline 写失败，
+    # 经 config._safe_print 进日志通道）应落入正式 logs/ 而非 get_logger
+    # 的 cwd 兜底位置；--list 同样受益（此前注释称其无需日志，已过时）
+    init_logger(os.path.join(app_dir, "logs"))
     store = TaskStore(os.path.join(app_dir, "config", "tasks.json"))
 
     if argv[0] == "--list":
@@ -104,8 +108,6 @@ def run_cli(argv, app_dir=None):
                 t.id[:8], t.name, "启用" if t.enabled else "禁用",
                 t.source, t.target, t.mode))
         return 0
-
-    init_logger(os.path.join(app_dir, "logs"))
 
     key = argv[1] if len(argv) > 1 else ""
     task = None

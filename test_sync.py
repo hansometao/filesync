@@ -2033,6 +2033,29 @@ finally:
 check(len(_calls35l) >= 1,
       "35l: _atomic_write_json 在 replace 前 fsync（G4）")
 
+# --- 35m. 第六轮修复回归: 编辑身份变更判定(H1) / CLI 日志初始化顺序(H2) ---
+print("[35m] 回归: 编辑身份变更判定(H1) / CLI 日志初始化顺序(H2)")
+from config import sync_identity_changed as _sic35m
+
+check(not _sic35m("/x/s", "/x/d", "one_way", "/x/s", "/x/d", "one_way"),
+      "35m: 身份未变返回 False（H1）")
+check(_sic35m("/x/s", "/x/d", "one_way", "/x/s2", "/x/d", "one_way"),
+      "35m: 仅源路径变化返回 True（H1）")
+check(_sic35m("/x/s", "/x/d", "one_way", "/x/s", "/x/d2", "one_way"),
+      "35m: 仅目标路径变化返回 True（H1）")
+check(_sic35m("/x/s", "/x/d", "one_way", "/x/s", "/x/d", "two_way"),
+      "35m: 仅同步方向变化返回 True（H1）")
+check(not _sic35m("s35m", "/x/d", "two_way",
+                  os.path.abspath("s35m"), "/x/d", "two_way"),
+      "35m: 相对/绝对表达同一路径视为未变（H1）")
+
+# H2: --list 时日志目录已在注入的 app_dir 下创建（init_logger 先于 TaskStore，
+# 持久层告警落入正式 logs/ 而非 cwd 兜底）
+d35m = tempfile.mkdtemp()
+rc35m, _out35m = _cli(["--list"], d35m)
+check(rc35m == 0 and os.path.isdir(os.path.join(d35m, "logs")),
+      "35m: run_cli 日志初始化先于配置加载（H2）")
+
 # ---------- 清理 ----------
 print("\n结果：%s" % ("全部通过" if not failures else "%d 项失败" % len(failures)))
 if failures:

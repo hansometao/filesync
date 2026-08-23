@@ -20,6 +20,7 @@ from tkinter import ttk, messagebox, scrolledtext
 
 from config import (
     Task, TaskStore, MODE_ONE_WAY, MODE_TWO_WAY, CONFLICT_ASK,
+    sync_identity_changed,
 )
 from scheduler import Scheduler
 from sync_engine import perform_sync, apply_diff, finalize_sync
@@ -236,6 +237,11 @@ class App(object):
             messagebox.showinfo("提示", "该任务正在运行中，请等待完成后再编辑")
             return
         try:
+            # 编辑模式 TaskDialog 原位改写 task 字段：先快照同步身份
+            # （源/目标/方向），保存后据此判定是否需要作废 baseline
+            prev_src = task.source
+            prev_dst = task.target
+            prev_mode = task.mode
             dlg = TaskDialog(self.root, task, self.store)
             self.root.wait_window(dlg)
             if dlg.result is not None:
@@ -243,6 +249,21 @@ class App(object):
                 # 避免对已发布给调度线程的对象做无锁跨线程写（违反 scheduler
                 # _next_lock 协议；置 None 幂等无害，但顺序上先改后发最干净）
                 dlg.result.next_run = None  # 重置，让调度器按新配置重算下次触发
+                # H1：身份变更后旧 baseline 是旧路径对的一致性快照，沿用会把
+                # 新目标侧文件误分类（removed/modified）——双向删除开启时源侧
+                # 被普通 delete 无备份删除、目标侧异容同名文件被无备份覆盖、
+                # 多余文件反向拷入源。作废后下次按首同步语义重分类（同内容
+                # no-op；异内容走冲突流程先备份）。顺序：先落盘清空基线再
+                # update 发布新路径——若中途崩溃，状态是"旧路径+空基线"，
+                # 首同步语义安全；反序则会把危险组合留在磁盘上。
+                if sync_identity_changed(prev_src, prev_dst, prev_mode,
+                                         dlg.result.source,
+                                         dlg.result.target, dlg.result.mode):
+                    dlg.result.baseline = {}
+                    self.store.save_baseline(dlg.result)
+                    self.logger.info(
+                        "任务[%s] 同步身份已变更(源/目标/方向)，baseline 已作废，"
+                        "下次同步按首同步重分类" % dlg.result.name)
                 self.store.update(dlg.result)
                 self._refresh_tasks(full=True)
                 # 与新增任务一致：编辑后若存在启用的定时任务则自动拉起调度器

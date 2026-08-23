@@ -92,6 +92,26 @@ def validate_schedule_input(sched_enabled, sched_type, interval_text, times_text
     return None
 
 
+def sync_identity_changed(prev_src, prev_dst, prev_mode, new_src, new_dst, new_mode):
+    # type: (str, str, str, str, str, str) -> bool
+    """判断任务编辑是否改变了"同步身份"（源路径/目标路径/同步方向）。
+
+    身份变更后旧 baseline 描述的仍是旧路径对的一致性快照，继续沿用会把
+    新目标侧既有文件按 baseline 误分类（removed/modified）：双向删除开启
+    时源侧文件被普通 delete 动作**无备份删除**，目标侧同名异容文件被无备
+    份覆盖、多余文件反向拷入源。调用方（gui_app._on_edit）据此作废
+    baseline，下次同步按首同步语义重分类（同内容 no-op；异内容走冲突流程，
+    先备份后覆盖）。include/exclude 变更无需作废：union 分类下新增可见
+    文件走 added+added 冲突流程（先备份），不再可见条目两侧同缺为 no-op，
+    天然安全。纯函数无 tkinter 依赖，GUI 与无头测试共用。
+    """
+    return (os.path.normcase(os.path.abspath(prev_src))
+            != os.path.normcase(os.path.abspath(new_src))
+            or os.path.normcase(os.path.abspath(prev_dst))
+            != os.path.normcase(os.path.abspath(new_dst))
+            or prev_mode != new_mode)
+
+
 @dataclass
 class Schedule(object):
     enabled: bool = False
