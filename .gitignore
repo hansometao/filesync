@@ -1,6 +1,7 @@
 # Python 运行产物
 __pycache__/
 *.pyc
+.mypy_cache/
 
 # 工具运行期数据（用户本地配置/日志/基线，不入库）
 config/
