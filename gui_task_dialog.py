@@ -123,60 +123,78 @@ class TaskDialog(tk.Toplevel):
 
     def _build(self):
         # type: () -> None
-        frm = ttk.Frame(self, padding=10)
-        frm.pack(fill=tk.BOTH, expand=True)
-        frm.columnconfigure(1, weight=1)
+        outer = ttk.Frame(self, padding=10)
+        outer.pack(fill=tk.BOTH, expand=True)
+        outer.columnconfigure(0, weight=1)
 
-        self._name = ttk.Entry(frm)
-        self._src = ttk.Entry(frm)
-        self._dst = ttk.Entry(frm)
-        self._mode = ttk.Combobox(frm, values=list(_MODE_LABELS.values()), state="readonly")
+        # ---- 基本信息 ----
+        basic = ttk.LabelFrame(outer, text="基本信息", padding=6)
+        basic.pack(fill=tk.X, pady=(0, 6))
+        basic.columnconfigure(1, weight=1)
+        self._name = ttk.Entry(basic)
+        self._src = ttk.Entry(basic)
+        self._dst = ttk.Entry(basic)
+        self._mode = ttk.Combobox(basic, values=list(_MODE_LABELS.values()), state="readonly")
         self._mode.set(_MODE_LABELS[MODE_ONE_WAY])
+        self._enabled = tk.BooleanVar(value=True)
+        r = 0
+        self._row(basic, r, "任务名称", self._name); r += 1
+        self._row(basic, r, "源目录", self._src, ttk.Button(basic, text="浏览", command=lambda: self._pick(self._src))); r += 1
+        self._row(basic, r, "目标目录", self._dst, ttk.Button(basic, text="浏览", command=lambda: self._pick(self._dst))); r += 1
+        self._row(basic, r, "启用任务", ttk.Checkbutton(basic, text="启用（取消则暂停该任务）", variable=self._enabled)); r += 1
+
+        # ---- 同步选项 ----
+        sync = ttk.LabelFrame(outer, text="同步选项", padding=6)
+        sync.pack(fill=tk.X, pady=(0, 6))
+        sync.columnconfigure(1, weight=1)
         self._ow_del = tk.BooleanVar()
         self._tw_del = tk.BooleanVar()
-        self._enabled = tk.BooleanVar(value=True)  # 新任务默认启用，避免被静默存为"禁用"
-        self._ow_del_chk = ttk.Checkbutton(frm, text="镜像时删除目标多余文件", variable=self._ow_del)
-        self._tw_del_chk = ttk.Checkbutton(frm, text="双向时传播删除", variable=self._tw_del)
-        self._sched_on = tk.BooleanVar()
-        self._sched_type = ttk.Combobox(frm, values=list(_SCHED_LABELS.values()), state="readonly")
-        self._sched_type.set(_SCHED_LABELS[SCHED_INTERVAL])
-        self._interval = ttk.Spinbox(frm, from_=1, to=99999, increment=1, width=10)
-        self._interval.set("60")
-        self._times = ttk.Entry(frm)
-        self._times.insert(0, "08:00,20:00")
-        self._weekdays = ttk.Entry(frm)
-        self._weekdays.insert(0, "1,3,5")  # 周一、三、五（1=周一 … 7=周日）
-        self._include = ttk.Entry(frm)
-        self._exclude = ttk.Entry(frm)
-        self._exclude.insert(0, "*.tmp,__pycache__/,node_modules/,.git/")
-        self._conflict = ttk.Combobox(frm, values=list(POLICY_LABELS.values()), state="readonly")
+        self._ow_del_chk = ttk.Checkbutton(sync, text="镜像时删除目标多余文件", variable=self._ow_del)
+        self._tw_del_chk = ttk.Checkbutton(sync, text="双向时传播删除", variable=self._tw_del)
+        self._conflict = ttk.Combobox(sync, values=list(POLICY_LABELS.values()), state="readonly")
         self._conflict.set(POLICY_LABELS[CONFLICT_NEWER])
-
         r = 0
-        self._row(frm, r, "任务名称", self._name); r += 1
-        self._row(frm, r, "源目录", self._src, ttk.Button(frm, text="浏览", command=lambda: self._pick(self._src))); r += 1
-        self._row(frm, r, "目标目录", self._dst, ttk.Button(frm, text="浏览", command=lambda: self._pick(self._dst))); r += 1
-        self._row(frm, r, "启用任务", ttk.Checkbutton(frm, text="启用（取消则暂停该任务）", variable=self._enabled)); r += 1
-        self._row(frm, r, "同步方向", self._mode); r += 1
-        self._row(frm, r, "单向选项", self._ow_del_chk); r += 1
-        self._row(frm, r, "双向选项", self._tw_del_chk); r += 1
+        self._row(sync, r, "同步方向", self._mode); r += 1
+        self._row(sync, r, "单向选项", self._ow_del_chk); r += 1
+        self._row(sync, r, "双向选项", self._tw_del_chk); r += 1
+        self._row(sync, r, "冲突策略", self._conflict); r += 1
 
-        # 调度
-        self._row(frm, r, "启用定时", ttk.Checkbutton(frm, text="启用", variable=self._sched_on)); r += 1
-        self._row(frm, r, "定时类型", self._sched_type); r += 1
-        self._row(frm, r, "间隔(分钟)", self._interval); r += 1
-        self._row(frm, r, "每日时刻", self._times); r += 1
-        self._row(frm, r, "每周(1-7)", self._weekdays); r += 1
+        # ---- 定时调度 ----
+        sched = ttk.LabelFrame(outer, text="定时调度", padding=6)
+        sched.pack(fill=tk.X, pady=(0, 6))
+        sched.columnconfigure(1, weight=1)
+        self._sched_on = tk.BooleanVar()
+        self._sched_type = ttk.Combobox(sched, values=list(_SCHED_LABELS.values()), state="readonly")
+        self._sched_type.set(_SCHED_LABELS[SCHED_INTERVAL])
+        self._interval = ttk.Spinbox(sched, from_=1, to=99999, increment=1, width=10)
+        self._interval.set("60")
+        self._times = ttk.Entry(sched)
+        self._times.insert(0, "08:00,20:00")
+        self._weekdays = ttk.Entry(sched)
+        self._weekdays.insert(0, "1,3,5")
+        r = 0
+        self._row(sched, r, "启用定时", ttk.Checkbutton(sched, text="启用", variable=self._sched_on)); r += 1
+        self._row(sched, r, "定时类型", self._sched_type); r += 1
+        self._row(sched, r, "间隔(分钟)", self._interval); r += 1
+        self._row(sched, r, "每日时刻", self._times); r += 1
+        self._row(sched, r, "每周(1-7)", self._weekdays); r += 1
 
-        self._row(frm, r, "包含规则", self._include); r += 1
-        self._row(frm, r, "排除规则", self._exclude); r += 1
-        self._row(frm, r, "冲突策略", self._conflict); r += 1
+        # ---- 过滤规则 ----
+        filt = ttk.LabelFrame(outer, text="过滤规则", padding=6)
+        filt.pack(fill=tk.X, pady=(0, 6))
+        filt.columnconfigure(1, weight=1)
+        self._include = ttk.Entry(filt)
+        self._exclude = ttk.Entry(filt)
+        self._exclude.insert(0, "*.tmp,__pycache__/,node_modules/,.git/")
+        r = 0
+        self._row(filt, r, "包含规则", self._include); r += 1
+        self._row(filt, r, "排除规则", self._exclude); r += 1
+        ttk.Label(filt, text="提示：包含/排除用逗号分隔，如 *.tmp,__pycache__/；每日时刻如 08:00,20:00").grid(
+            row=r, column=0, columnspan=3, sticky=tk.W, padx=4, pady=(4, 0))
 
-        ttk.Label(frm, text="提示：包含/排除用逗号分隔，如 *.tmp,__pycache__/；每日时刻如 08:00,20:00").grid(
-            row=r, column=0, columnspan=3, sticky=tk.W, padx=4, pady=8); r += 1
-
-        btn = ttk.Frame(frm)
-        btn.grid(row=r, column=0, columnspan=3, pady=10)
+        # ---- 按钮 ----
+        btn = ttk.Frame(outer)
+        btn.pack(fill=tk.X, pady=(6, 0))
         ttk.Button(btn, text="保存", command=self._on_save).pack(side=tk.RIGHT, padx=4)
         ttk.Button(btn, text="取消", command=self._on_cancel).pack(side=tk.RIGHT, padx=4)
 

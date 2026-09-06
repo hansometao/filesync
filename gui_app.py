@@ -149,14 +149,17 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin):
         self.root.title("文件夹同步备份工具  v%s" % APP_VERSION)
         self.root.geometry("900x620")
 
+        # 工具栏分组：任务操作 | 调度/工具
         top = ttk.Frame(self.root)
         top.pack(fill=tk.X)
         ttk.Button(top, text="新增任务", command=self._on_add).pack(side=tk.LEFT, padx=3, pady=4)
         ttk.Button(top, text="编辑", command=self._on_edit).pack(side=tk.LEFT, padx=3, pady=4)
         ttk.Button(top, text="删除", command=self._on_delete).pack(side=tk.LEFT, padx=3, pady=4)
         ttk.Button(top, text="立即同步", command=self._on_sync_now).pack(side=tk.LEFT, padx=3, pady=4)
+        ttk.Separator(top, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6, pady=4)
         self._sched_btn = ttk.Button(top, text="启动调度", command=self._toggle_scheduler)
         self._sched_btn.pack(side=tk.LEFT, padx=3, pady=4)
+        ttk.Separator(top, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6, pady=4)
         ttk.Button(top, text="打开日志目录", command=self._open_logs).pack(side=tk.LEFT, padx=3, pady=4)
 
         cols = ("name", "mode", "source", "target", "next", "status", "last")
@@ -175,13 +178,13 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin):
         self.tree.heading("next", text="下次运行")
         self.tree.heading("status", text="状态")
         self.tree.heading("last", text="上次运行")
-        self.tree.column("name", width=120)
-        self.tree.column("mode", width=80)
-        self.tree.column("source", width=180)
-        self.tree.column("target", width=180)
-        self.tree.column("next", width=130)
-        self.tree.column("status", width=90)
-        self.tree.column("last", width=130)
+        self.tree.column("name", width=100, minwidth=80)
+        self.tree.column("mode", width=70, minwidth=60)
+        self.tree.column("source", width=200, minwidth=120)
+        self.tree.column("target", width=200, minwidth=120)
+        self.tree.column("next", width=120, minwidth=100)
+        self.tree.column("status", width=80, minwidth=60)
+        self.tree.column("last", width=120, minwidth=100)
         # 右键快捷菜单：单任务启用/禁用（免进编辑对话框）
         self.tree.bind("<Button-3>", self._on_task_context_menu)
 
@@ -190,7 +193,7 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin):
 
         log_frm = ttk.LabelFrame(self.root, text="运行日志", padding=4)
         log_frm.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
-        self.log_text = scrolledtext.ScrolledText(log_frm, height=10, state=tk.DISABLED)
+        self.log_text = scrolledtext.ScrolledText(log_frm, height=6, state=tk.DISABLED)
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
     # ---------- 任务列表 ----------
