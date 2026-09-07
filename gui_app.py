@@ -302,7 +302,7 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin):
             log_outer, height=5, state=tk.DISABLED,
             font=("Consolas", 9), bg="#FFFFFF", fg=C_TEXT,
             relief=tk.SOLID, bd=1, highlightthickness=0,
-            borderwidth=1, bordercolor=C_BORDER)
+            borderwidth=1)
         self.log_text.pack(fill=tk.X, pady=(2, 0))
 
         # P1: 日志按级别着色（ERROR 红 / WARN 橙），提升扫读性
