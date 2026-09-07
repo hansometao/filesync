@@ -819,15 +819,6 @@ def perform_sync(task, logger=None, conflict_override=None, dry_run=False,
             and task.baseline and not dst_snap and os.path.isdir(longpath(dst_root))):
         return _abort("目标目录为空但已有同步记录，可能目标盘被更换/清空，"
                       "已中止以防误删源侧: %s" % dst_root)
-    # C1 防线二（源空根）：镜像于目标侧，对称补漏——源根**存在但扫描为空**而
-    # baseline 非空时，diff 会把 baseline 条目判成 sb="removed"，配合
-    # two_way_delete 生成"删除(B 侧)"动作，**无备份整侧删除目标文件**。
-    # 此前只有目标侧有这道护栏，源侧空根（目录被清空/换空盘但保留目录）会
-    # 绕过全部防线造成一次性误删，故补齐对称分支。
-    if (task.mode == MODE_TWO_WAY and getattr(task, "two_way_delete", False)
-            and task.baseline and not src_snap and os.path.isdir(longpath(src_root))):
-        return _abort("源目录为空但已有同步记录，可能源目录被清空/更换，"
-                      "已中止以防误删目标侧: %s" % src_root)
     # C1 防线二：任一侧扫描有错误（如子目录权限被拒）时快照不完整，diff
     # 会把缺失条目判成 removed，配合删除传播即误删对侧。宁可失败重试。
     scan_errors = src_errors + dst_errors
@@ -838,6 +829,18 @@ def perform_sync(task, logger=None, conflict_override=None, dry_run=False,
         progress("对比差异中...")
     result = diff(src_snap, dst_snap, task, src_root, dst_root,
                   cancel_event=cancel_event)
+    # C1 防线二（源空根）：镜像于目标侧，对称补漏——源根**存在但扫描为空**而
+    # baseline 非空时，配合 two_way_delete 可能把 baseline 条目判成 removed，
+    # 生成"删除(B 侧)"动作，**无备份整侧删除目标文件**（源被清空/换空盘）。
+    # 但必须排除"删除 vs 修改"冲突（conflict_del，备份后按策略恢复/传播，数据
+    # 不丢）：该场景下源空根是"用户删掉最后一个源文件"的合法结果，diff 产出的是
+    # conflict_del 而非裸 delete，不能误伤。故仅在确有**裸删除动作**（对侧内容
+    # 未修改、将静默整删）时才中止，把安全护栏精确落在"盘被更换"这一灾难路径上。
+    if (task.mode == MODE_TWO_WAY and getattr(task, "two_way_delete", False)
+            and task.baseline and not src_snap and os.path.isdir(longpath(src_root))
+            and any(a.kind == "delete" for a in result.actions)):
+        return _abort("源目录为空但已有同步记录，可能源目录被清空/更换，"
+                      "已中止以防误删目标侧: %s" % src_root)
     if dry_run:
         logs = ["[预览] %s %s" % (a.detail, a.rel) for a in result.actions]
         return {"diff": result, "logs": logs, "changed": not result.is_empty(),
