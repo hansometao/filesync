@@ -295,6 +295,15 @@ class Scheduler(object):
         with self._lock:
             # enabled 复查在锁内进行：读 task.enabled 未持锁时，GUI 禁用与
             # poll 触发存在竞态窗口（禁用瞬间仍可能启动最后一次运行）
+            #
+            # 竞态窗口说明：task.enabled/schedule.enabled 在 _poll_task 开头
+            # L273 无锁读取，与 _lock 内 L298-299 的复查之间存在极小窗口——
+            # GUI 线程可能在此期间调用 store.update(task) 禁用任务。后果仅是
+            # "禁用瞬间仍触发最后一次运行"，不会导致数据损坏或状态不一致
+            # （下次 poll 时 L273 已看到 disabled，不再触发）。锁内复查
+            # L298-299 将此窗口压缩到最小；若要完全消除需在 L273 就持锁，
+            # 但 _poll_once 遍历全部任务时持锁会让 GUI 的 add/update/remove
+            # 长时间等待，权衡后接受此极小窗口。
             if (task.id not in self._running
                     and not self._stop and task.enabled and task.schedule.enabled):
                 self._running.add(task.id)

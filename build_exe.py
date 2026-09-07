@@ -84,6 +84,9 @@ def main():
     bak = _backup_old_artifact()
     cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "folder_sync.spec"]
     print("执行: %s" % " ".join(cmd))
+    # 安全说明：cmd 为本地固定拼接的列表（sys.executable + PyInstaller 子命令 +
+    # spec 文件名），不含用户输入，不存在命令注入风险。subprocess.call 使用
+    # 列表形式（非 shell=True），参数不经 shell 解释。
     rc = subprocess.call(cmd, cwd=HERE)
     if rc != 0:
         print("\n打包失败（退出码 %d）" % rc)

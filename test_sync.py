@@ -2546,7 +2546,161 @@ class _FakeLog35l(object):
         _got35l.append(m)
 
 
-TESTS = [test_1, test_2, test_3_run_now, test_2b_D_mtime, test_3b, test_3c_interval_last_run, test_4, test_5_save, test_6_M4, test_7_2s, test_8_M10_baseline, test_9_L4, test_10_CLI_run_cli, test_11_S1_SE1, test_12_include, test_13_interval_next_run, test_14_run_now, test_15_daily, test_16_logger, test_17, test_18_config_baseline, test_19_GUI, test_20_utils_paths, test_21_utils_timeutil, test_22_scanner, test_23_config_Task, test_24_logger_close, test_25_GUI_mock, test_26_run_now_next_run, test_27_fail_count, test_28_mkdir_type_conflict, test_29_F4_interval, test_30_F5_daily, test_31_F6_baseline, test_32_C1_C2, test_33_tray_autostart, test_34_fast_FAT32, test_35_vs_skip, test_36_refactor_regress, test_37_ui_review_fixes, test_38_app_split_structure]
+def test_39_from_dict_boundary():
+    # type: () -> None
+    """自测节 39. from_dict / validate_* 边界值清洗覆盖"""
+    _fail_base = len(failures)
+    print("[39] from_dict / validate_* 边界值")
+    from config import (
+        Schedule as _Sched39, Task as _Task39,
+        validate_schedule_input as _vs39,
+        SCHED_INTERVAL, SCHED_DAILY, SCHED_WEEKLY,
+        CONFLICT_NEWER,
+    )
+
+    # --- Schedule.from_dict 边界 ---
+    # times 非 list（str/dict/None）→ 回退空列表
+    s = _Sched39.from_dict({"times": "08:00,20:00"})
+    check(s.times == [], "39: times 为 str 回退空列表")
+    s = _Sched39.from_dict({"times": {"x": 1}})
+    check(s.times == [], "39: times 为 dict 回退空列表")
+    s = _Sched39.from_dict({"times": None})
+    check(s.times == [], "39: times 为 None 回退空列表")
+    # times 元素非 str 或格式非法 → 被过滤
+    s = _Sched39.from_dict({"times": [123, True, "25:00", "08:00"]})
+    check(s.times == ["08:00"], "39: times 非法元素被过滤, 合法保留")
+    s = _Sched39.from_dict({"times": ["", "  ", "08:00"]})
+    check(s.times == ["08:00"], "39: times 空白元素被过滤")
+    # times 带前后空格 → strip 后保留
+    s = _Sched39.from_dict({"times": [" 08:00 ", "20:00"]})
+    check(s.times == ["08:00", "20:00"], "39: times 前后空格被 strip")
+
+    # weekdays 非 list（str/dict/None）→ 回退空列表
+    s = _Sched39.from_dict({"weekdays": "1,3,5"})
+    check(s.weekdays == [], "39: weekdays 为 str 回退空列表")
+    s = _Sched39.from_dict({"weekdays": None})
+    check(s.weekdays == [], "39: weekdays 为 None 回退空列表")
+    # weekdays 越界值 (0, 8, -1) 被过滤
+    s = _Sched39.from_dict({"weekdays": [0, 1, 8, -1, 3]})
+    check(s.weekdays == [1, 3], "39: weekdays 越界值 (0/8/-1) 被过滤")
+    # weekdays 重复值去重
+    s = _Sched39.from_dict({"weekdays": [1, 3, 1, 5, 3]})
+    check(s.weekdays == [1, 3, 5], "39: weekdays 重复值去重")
+    # weekdays 元素类型：int("2")=2 合法、int(True)=1 合法（bool 是 int 子类）、"abc" 非法
+    s = _Sched39.from_dict({"weekdays": ["2", 4, "abc", True]})
+    check(s.weekdays == [2, 4, 1], "39: weekdays 数字str/bool(int子类)可转, 文本str被过滤")
+
+    # interval_minutes 非法值
+    s = _Sched39.from_dict({"interval_minutes": "abc"})
+    check(s.interval_minutes == 60, "39: interval_minutes 非数字回退 60")
+    s = _Sched39.from_dict({"interval_minutes": -5})
+    check(s.interval_minutes == 60, "39: interval_minutes 负数回退 60")
+    s = _Sched39.from_dict({"interval_minutes": 0})
+    check(s.interval_minutes == 60, "39: interval_minutes 零回退 60")
+    s = _Sched39.from_dict({"interval_minutes": 1})
+    check(s.interval_minutes == 1, "39: interval_minutes=1 合法保留")
+    s = _Sched39.from_dict({"interval_minutes": True})
+    check(s.interval_minutes == 1, "39: interval_minutes=bool(True)=1 合法保留(1>=1)")
+
+    # type 白名单外值回退
+    s = _Sched39.from_dict({"type": "bogus"})
+    check(s.type == SCHED_INTERVAL, "39: type 非法值回退 interval")
+
+    # --- Task.from_dict 边界 ---
+    # include/exclude 非 list（str/dict/None）→ 回退空列表
+    t = _Task39.from_dict({"include": "*.py"})
+    check(t.include == [], "39: include 为 str 回退空列表")
+    t = _Task39.from_dict({"exclude": {"x": 1}})
+    check(t.exclude == [], "39: exclude 为 dict 回退空列表")
+    t = _Task39.from_dict({"include": None})
+    check(t.include == [], "39: include 为 None 回退空列表")
+    # include 元素非 str 或 strip 后空 → 被过滤
+    t = _Task39.from_dict({"include": [123, True, "", "  ", "*.py"]})
+    check(t.include == ["*.py"], "39: include 非法元素被过滤, 合法保留")
+    t = _Task39.from_dict({"include": [" *.txt ", "*.log"]})
+    check(t.include == ["*.txt", "*.log"], "39: include 前后空格被 strip")
+
+    # name/source/target 非 str → 回退空字符串
+    t = _Task39.from_dict({"name": 123, "source": True, "target": []})
+    check(t.name == "" and t.source == "" and t.target == "",
+          "39: name/source/target 非 str 回退空字符串")
+
+    # last_run 为 bool → None（bool 是 int 子类, True=1 会被当成合法 epoch）
+    t = _Task39.from_dict({"last_run": True})
+    check(t.last_run is None, "39: last_run=True 回退 None")
+    t = _Task39.from_dict({"last_run": False})
+    check(t.last_run is None, "39: last_run=False 回退 None")
+    t = _Task39.from_dict({"last_run": "not-a-number"})
+    check(t.last_run is None, "39: last_run 非数值 str 回退 None")
+
+    # last_status/last_summary 非 str → 回退空字符串
+    t = _Task39.from_dict({"last_status": 42, "last_summary": [1]})
+    check(t.last_status == "" and t.last_summary == "",
+          "39: last_status/last_summary 非 str 回退空字符串")
+
+    # enabled 非 bool → bool() 转换
+    t = _Task39.from_dict({"enabled": "yes"})
+    check(t.enabled is True, "39: enabled 非空 str 转 True")
+    t = _Task39.from_dict({"enabled": ""})
+    check(t.enabled is False, "39: enabled 空 str 转 False")
+    t = _Task39.from_dict({"enabled": 0})
+    check(t.enabled is False, "39: enabled=0 转 False")
+
+    # schedule 非 dict（str/None/int）→ 回退默认 Schedule
+    t = _Task39.from_dict({"schedule": "bogus"})
+    check(t.schedule.interval_minutes == 60 and not t.schedule.enabled,
+          "39: schedule 为 str 回退默认 Schedule")
+    t = _Task39.from_dict({"schedule": None})
+    check(t.schedule.interval_minutes == 60, "39: schedule 为 None 回退默认")
+    t = _Task39.from_dict({"schedule": 42})
+    check(t.schedule.interval_minutes == 60, "39: schedule 为 int 回退默认")
+
+    # --- validate_schedule_input 边界 ---
+    # disabled 调度 → 任何输入都合法
+    check(_vs39(False, SCHED_INTERVAL, "abc", "", "") is None,
+          "39: disabled interval 任意输入合法")
+    check(_vs39(False, SCHED_DAILY, "abc", "", "") is None,
+          "39: disabled daily 任意输入合法")
+
+    # interval=1（最小合法值）
+    check(_vs39(True, SCHED_INTERVAL, "1", "", "") is None,
+          "39: interval=1 合法")
+    # interval=-1（负数）
+    check(_vs39(True, SCHED_INTERVAL, "-1", "", "") is not None,
+          "39: interval=-1 非法")
+
+    # 非 interval 类型 + 间隔栏为 "abc" → 不拦截（仅 interval 类型检查间隔）
+    check(_vs39(True, SCHED_DAILY, "abc", "08:00", "1") is None,
+          "39: daily 类型不检查间隔栏, abc 合法")
+    check(_vs39(True, SCHED_WEEKLY, "abc", "09:00", "1,3") is None,
+          "39: weekly 类型不检查间隔栏, abc 合法")
+
+    # daily 边界时刻 00:00 / 23:59
+    check(_vs39(True, SCHED_DAILY, "60", "00:00", "1") is None,
+          "39: daily 00:00 合法")
+    check(_vs39(True, SCHED_DAILY, "60", "23:59", "1") is None,
+          "39: daily 23:59 合法")
+    # 24:00 非法
+    check(_vs39(True, SCHED_DAILY, "60", "24:00", "1") is not None,
+          "39: daily 24:00 非法")
+    # 单个合法时刻
+    check(_vs39(True, SCHED_DAILY, "60", "12:00", "1") is None,
+          "39: daily 单个合法时刻通过")
+
+    # weekly 边界 weekday 1 / 7
+    check(_vs39(True, SCHED_WEEKLY, "60", "09:00", "1") is None,
+          "39: weekly weekday=1(周一) 合法")
+    check(_vs39(True, SCHED_WEEKLY, "60", "09:00", "7") is None,
+          "39: weekly weekday=7(周日) 合法")
+    check(_vs39(True, SCHED_WEEKLY, "60", "09:00", "0") is not None,
+          "39: weekly weekday=0 非法")
+    check(_vs39(True, SCHED_WEEKLY, "60", "09:00", "8") is not None,
+          "39: weekly weekday=8 非法")
+
+    assert len(failures) == _fail_base, "test_39_from_dict_boundary: 本节有断言失败"
+
+
+TESTS = [test_1, test_2, test_3_run_now, test_2b_D_mtime, test_3b, test_3c_interval_last_run, test_4, test_5_save, test_6_M4, test_7_2s, test_8_M10_baseline, test_9_L4, test_10_CLI_run_cli, test_11_S1_SE1, test_12_include, test_13_interval_next_run, test_14_run_now, test_15_daily, test_16_logger, test_17, test_18_config_baseline, test_19_GUI, test_20_utils_paths, test_21_utils_timeutil, test_22_scanner, test_23_config_Task, test_24_logger_close, test_25_GUI_mock, test_26_run_now_next_run, test_27_fail_count, test_28_mkdir_type_conflict, test_29_F4_interval, test_30_F5_daily, test_31_F6_baseline, test_32_C1_C2, test_33_tray_autostart, test_34_fast_FAT32, test_35_vs_skip, test_36_refactor_regress, test_37_ui_review_fixes, test_38_app_split_structure, test_39_from_dict_boundary]
 
 if __name__ == "__main__":
     import traceback
