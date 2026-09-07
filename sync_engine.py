@@ -461,9 +461,17 @@ def _resolve_del_conflict(action, policy, on_ask=None):
     # 判定哪侧是删除侧：diff 时 removed 侧路径已不存在
     del_a = not os.path.exists(longpath(a_path))  # 源侧删除？
     del_b = not os.path.exists(longpath(b_path))  # 目标侧删除？
-    if del_a == del_b:
+    if del_a and del_b:
         # 两侧都不存在（罕见竞态：冲突判定后又被删）→ 视为已收敛
         return "删除/修改冲突: 两侧均已消失, 忽略", False, False
+    if not del_a and not del_b:
+        # I1 修复：两侧都存在 = 冲突判定后状态已变（如删除侧文件被回收站
+        # 还原、并发 CLI 进程、on_ask 弹窗期外部写入）。此前 del_a == del_b
+        # 会误把本分支当"两侧均消失"静默吞掉冲突，且不记入 unresolved，
+        # baseline 固化目标侧内容后，下一轮恢复的旧版将无备份覆盖另一侧
+        # 修改。此处保守视为状态变化，计入未解决，下次同步重新 diff。
+        logger.warn("删除/修改冲突状态已变(两侧均存在), 留待下次重检: %s" % action.rel)
+        return "删除/修改冲突状态已变(两侧均存在), 留待重检", False, True
     # 决定删除方是否胜出
     if policy == CONFLICT_SOURCE:
         del_wins = del_a
@@ -613,12 +621,20 @@ def _stat_meta(root, rel):
 def _dst_dirty_rels(actions, src_root, dst_root):
     # type: (List[Action], str, str) -> set
     """收集本次执行在目标侧产生新增/覆盖/删除的相对路径（重建 baseline 时需重扫）。"""
+    # I2 修复：Windows 上 abspath("E:\\") == "E:\\"（保留盘根尾反斜杠），
+    # dst_root + os.sep 拼成 "E:\\\\"，而 join_rel 产物是 "E:\\a.txt"，
+    # 二者 startswith 恒 False——目标为盘根/UNC 根时所有动作都不进 dirty，
+    # baseline 系统性沿用过期快照。改用 relpath 判定，覆盖根路径场景。
     dirty = set()
     for act in actions:
         tp = os.path.abspath(act.to_path) if act.to_path else None
         if tp is None:
             continue
-        in_dst = tp == dst_root or tp.startswith(dst_root + os.sep)
+        try:
+            rel = os.path.relpath(tp, dst_root)
+        except ValueError:
+            rel = None  # 不同盘符，绝不可能在 dst_root 之下
+        in_dst = rel is not None and rel != os.pardir and not rel.startswith(".." + os.sep)
         if act.kind == "copy" and in_dst:
             dirty.add(act.rel)
         elif act.kind == "delete" and in_dst:
@@ -803,6 +819,15 @@ def perform_sync(task, logger=None, conflict_override=None, dry_run=False,
             and task.baseline and not dst_snap and os.path.isdir(longpath(dst_root))):
         return _abort("目标目录为空但已有同步记录，可能目标盘被更换/清空，"
                       "已中止以防误删源侧: %s" % dst_root)
+    # C1 防线二（源空根）：镜像于目标侧，对称补漏——源根**存在但扫描为空**而
+    # baseline 非空时，diff 会把 baseline 条目判成 sb="removed"，配合
+    # two_way_delete 生成"删除(B 侧)"动作，**无备份整侧删除目标文件**。
+    # 此前只有目标侧有这道护栏，源侧空根（目录被清空/换空盘但保留目录）会
+    # 绕过全部防线造成一次性误删，故补齐对称分支。
+    if (task.mode == MODE_TWO_WAY and getattr(task, "two_way_delete", False)
+            and task.baseline and not src_snap and os.path.isdir(longpath(src_root))):
+        return _abort("源目录为空但已有同步记录，可能源目录被清空/更换，"
+                      "已中止以防误删目标侧: %s" % src_root)
     # C1 防线二：任一侧扫描有错误（如子目录权限被拒）时快照不完整，diff
     # 会把缺失条目判成 removed，配合删除传播即误删对侧。宁可失败重试。
     scan_errors = src_errors + dst_errors

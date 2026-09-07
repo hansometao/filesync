@@ -162,7 +162,11 @@ class TaskCard(ttk.Frame):
         self._status_lbl.pack(side=tk.RIGHT, padx=(0, 8))
 
         # 右键菜单 / 选中 / 双击运行 绑定（整卡都响应）
-        for w in (self, self._sw_canvas, info, name_row, self._name_lbl,
+        # C2 修复：_sw_canvas 必须从本循环剔除——tkinter bind 是替换语义，
+        # 若在此对 _sw_canvas 再绑 <Button-1>，会覆盖 __init__ 中开关的切换
+        # 绑定，导致开关失效；且会绑 <Double-Button-1> 让快速点两下开关误触
+        # 同步。开关仅保留第 98 行的切换绑定与单独右键菜单。
+        for w in (self, info, name_row, self._name_lbl,
                   self._mode_lbl, self._path_lbl, self._sched_lbl, right,
                   self._next_lbl, self._btn_frame, self._status_lbl):
             try:
@@ -172,6 +176,11 @@ class TaskCard(ttk.Frame):
                 w.bind("<Double-Button-1>", self._on_dblclick)
             except tk.TclError:
                 pass
+        # 开关自身的右键菜单（不覆盖其 <Button-1> 切换绑定）
+        try:
+            self._sw_canvas.bind("<Button-3>", self._on_context_menu)
+        except tk.TclError:
+            pass
 
         # 选择态高亮：绑定 1px 实线边框
         self._selected = False

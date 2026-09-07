@@ -193,13 +193,17 @@ class TrayIcon(object):
 
     def _configure_api(self, user32, shell32, kernel32):
         # type: (Any, Any, Any) -> None
-        """为句柄/返回值类 Win32 API 设置 restype，避免 64 位进程上句柄截断。
+        """为句柄/返回值类 Win32 API 设置 restype 与 argtypes。
 
-        ctypes 默认 restype 是 32 位 int：HWND/HICON/HMODULE 等指针在 64 位
-        下被截断成低 32 位（经典陷阱），必须显式声明（仅在 _create 内调用，
-        即仅 Win32 运行时执行）。
+        两个都必要，缺一不可：
+        - restype 防**返回值**在 64 位下被截断成低 32 位；
+        - argtypes 防**参数**（句柄/指针宽度）被 ctypes 按默认 C int 传 32 位
+          静默截断——例如无 argtypes 时 GetModuleHandleW(None) 的完整 64 位
+          基址传给 CreateWindowExW 会被截断，类查找 hInstance 不匹配导致
+          创建失败（经典错误 1407）。此前只配了 restype、漏了 argtypes。
+        仅在 _create 内调用（仅 Win32 运行时执行）。
         """
-        # 句柄返回类
+        # ---- 句柄返回类 restype ----
         user32.CreateWindowExW.restype = wintypes.HWND
         user32.LoadImageW.restype = wintypes.HICON
         user32.LoadIconW.restype = wintypes.HICON
@@ -221,6 +225,43 @@ class TrayIcon(object):
         user32.AppendMenuW.restype = wintypes.BOOL
         user32.UnregisterClassW.restype = wintypes.BOOL
         shell32.Shell_NotifyIconW.restype = wintypes.BOOL
+
+        # ---- 参数类 argtypes：句柄/指针一律用指针宽度类型 ----
+        WNDPROC = ctypes.WINFUNCTYPE(
+            ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT,
+            wintypes.WPARAM, wintypes.LPARAM)
+        user32.DefWindowProcW.argtypes = [
+            wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        user32.RegisterClassW.argtypes = [ctypes.POINTER(WNDCLASSW)]
+        user32.CreateWindowExW.argtypes = [
+            ctypes.c_ulong, wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_ulong,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, ctypes.c_void_p]
+        user32.DestroyWindow.argtypes = [wintypes.HWND]
+        user32.LoadImageW.argtypes = [
+            wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT,
+            wintypes.INT, wintypes.INT, wintypes.UINT]
+        user32.LoadIconW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR]
+        user32.DestroyIcon.argtypes = [wintypes.HICON]
+        user32.CreatePopupMenu.argtypes = []
+        user32.AppendMenuW.argtypes = [
+            wintypes.HMENU, wintypes.UINT, ctypes.c_size_t, wintypes.LPCWSTR]
+        user32.DestroyMenu.argtypes = [wintypes.HMENU]
+        user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.TrackPopupMenu.argtypes = [
+            wintypes.HMENU, wintypes.UINT, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, wintypes.HWND, ctypes.c_void_p]
+        user32.SetActiveWindow.argtypes = [wintypes.HWND]
+        user32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND, wintypes.LPDWORD]
+        user32.AttachThreadInput.argtypes = [
+            wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+        user32.UnregisterClassW.argtypes = [wintypes.LPCWSTR, wintypes.HINSTANCE]
+        kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+        kernel32.GetCurrentThreadId.argtypes = []
+        shell32.Shell_NotifyIconW.argtypes = [
+            ctypes.c_ulong, ctypes.POINTER(NOTIFYICONDATAW)]
 
     def _cleanup_after_failed_create(self, user32, kernel32, hinst):
         # type: (Any, Any, Any) -> None

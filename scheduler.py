@@ -242,6 +242,12 @@ class Scheduler(object):
         # type: (Optional[float]) -> None
         if now is None:
             now = now_epoch()
+        # I5 修复：单次迭代开头复查 _stop。stop() 可能正被磁盘 I/O 阻塞场景下
+        # 《3 秒上限返回》，而本次 poll 恢复后仍会继续处理到期任务并启动 worker，
+        # 该 worker 可能逃逸退出流程 wait_workers 的快照被强杀。有此检查后，
+        # stop() 已置位即为停摆信号，本轮不再启动任何任务。
+        if self._stop:
+            return
         # 用快照迭代：直接遍历 store.tasks 时，GUI 线程并发 add/remove 会
         # 原地修改列表，抛 RuntimeError: list changed size during iteration
         # （当轮轮询中断，其后任务被跳过）
@@ -290,7 +296,7 @@ class Scheduler(object):
             # enabled 复查在锁内进行：读 task.enabled 未持锁时，GUI 禁用与
             # poll 触发存在竞态窗口（禁用瞬间仍可能启动最后一次运行）
             if (task.id not in self._running
-                    and task.enabled and task.schedule.enabled):
+                    and not self._stop and task.enabled and task.schedule.enabled):
                 self._running.add(task.id)
                 t = threading.Thread(
                     target=self._worker, args=(task.id,),

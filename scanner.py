@@ -215,7 +215,11 @@ def _handle_file(ctx, entry, root, name, rel):
     except FileNotFoundError:
         return  # 扫描间隙文件被删：瞬时竞态，跳过即可
     except OSError as e:
-        get_logger().debug("无法读取文件信息(跳过) %s: %s" % (rel, e))
+        # I3 修复：权限拒绝/网络盘错误这类**持续性**失败若静默跳过，条目会从
+        # 快照中消失，diff 判其 removed 后经删除传播误删对侧（源其实还在）。
+        # 这些不等于"扫描间隙被删"，应记入 error_sink，由 perform_sync
+        # 走"扫描不完整"路径统一中止，守护整条防线的最后缺口。
+        _scan_err(ctx, "无法读取文件信息做快照(将中止同步) %s: %s" % (rel, e))
         return
     meta = FileMeta(st.st_size, st.st_mtime)
     if ctx.with_hash:
