@@ -73,7 +73,7 @@ class TrayMenuMixin(object):
         """创建托盘图标（失败不致命：降级为任务栏最小化）。"""
         try:
             self._tray = tray_mod.TrayIcon(
-                "文件夹同步备份工具",
+                "filesync",
                 menu=[(1, "显示主窗口"), (2, "退出")],
                 on_menu=self._on_tray_menu,
                 on_activate=self._restore_from_tray,

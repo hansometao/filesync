@@ -78,7 +78,7 @@ def _cli_output_popup(fn):
     root = tk.Tk()
     root.withdraw()
     try:
-        messagebox.showinfo("文件夹同步备份工具", text)
+        messagebox.showinfo("filesync", text)
     finally:
         root.destroy()
     return rc
@@ -174,6 +174,19 @@ def main():
     import tkinter as tk
     from tkinter import ttk
     from gui_app import App
+
+    # Windows 高 DPI 适配：声明 DPI 感知后系统不再对窗口做位图拉伸，
+    # 文字在高分屏上保持锐利。Win 8.1+ 用 SetProcessDpiAwareness，
+    # Win7 兜底 SetProcessDPIAware；失败静默降级（保持原有缩放行为）
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            try:
+                ctypes.windll.shcore.SetProcessDpiAwareness(1)
+            except Exception:
+                ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
 
     root = tk.Tk()
     try:
