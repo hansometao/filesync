@@ -168,28 +168,12 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin):
         tk.Label(brand_left, text="定时文件同步工具", font=("", 10),
                  bg=C_BRAND, fg="#E0F2F1").pack(side=tk.LEFT)
 
-        # 右：全局按钮（运行全部 / 新建组 / 设置）
+        # 右：全局按钮（设置）
         brand_right = tk.Frame(brand, bg=C_BRAND)
         brand_right.pack(side=tk.RIGHT, padx=12)
 
-        run_all_btn = tk.Button(
-            brand_right, text="▶ 运行全部", font=("", 10, "bold"),
-            fg="#FFFFFF", bg=C_BRAND_DARK, activebackground="#00695C",
-            relief=tk.FLAT, bd=0, padx=14, pady=6, cursor="hand2",
-            command=self._on_run_all)
-        run_all_btn.pack(side=tk.LEFT, padx=(0, 6))
-
-        new_group_btn = tk.Button(
-            brand_right, text="＋ 新建组", font=("", 9),
-            fg="#FFFFFF", bg=C_BRAND, activebackground=C_BRAND_DARK,
-            relief=tk.FLAT, bd=0, padx=10, pady=6, cursor="hand2",
-            command=self._on_new_group)
-        new_group_btn.pack(side=tk.LEFT, padx=(0, 6))
-
-        settings_btn = tk.Button(
-            brand_right, text="⚙ 设置", font=("", 9),
-            fg="#FFFFFF", bg=C_BRAND, activebackground=C_BRAND_DARK,
-            relief=tk.FLAT, bd=0, padx=10, pady=6, cursor="hand2",
+        settings_btn = ttk.Button(
+            brand_right, text="⚙ 设置", style="Brand.TButton",
             command=self._on_settings)
         settings_btn.pack(side=tk.LEFT)
 
@@ -197,19 +181,36 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin):
         toolbar = tk.Frame(self.root, bg=C_BG)
         toolbar.pack(fill=tk.X, side=tk.TOP, padx=14, pady=(10, 4))
 
-        self._add_btn = tk.Button(
-            toolbar, text="＋ 添加任务", font=("", 9, "bold"),
-            fg="#FFFFFF", bg=C_BRAND, activebackground=C_BRAND_DARK,
-            relief=tk.FLAT, bd=0, padx=14, pady=5, cursor="hand2",
+        self._add_btn = ttk.Button(
+            toolbar, text="＋ 添加任务", style="Accent.TButton",
             command=self._on_add)
         self._add_btn.pack(side=tk.LEFT)
 
-        self._run_all_tb = tk.Button(
-            toolbar, text="▶ 运行全部", font=("", 9),
-            fg=C_TEXT, bg="#FFFFFF", relief=tk.SOLID, bd=1,
-            activebackground=C_CARD_BG_ALT, padx=14, pady=5, cursor="hand2",
+        self._run_all_tb = ttk.Button(
+            toolbar, text="▶ 运行全部", style="Outline.TButton",
             command=self._on_run_all)
         self._run_all_tb.pack(side=tk.LEFT, padx=(6, 0))
+
+        # 搜索/筛选
+        self._search_var = tk.StringVar()
+        self._search_var.trace_add("write", lambda *_: self._on_search())
+        _search_frame = tk.Frame(toolbar, bg=C_BG)
+        _search_frame.pack(side=tk.LEFT, padx=(12, 0))
+        _search_icon = tk.Label(_search_frame, text="🔍", font=("", 9),
+                                bg="#FFFFFF", fg=C_TEXT_MUTED, padx=4)
+        _search_icon.pack(side=tk.LEFT)
+        self._search_entry = tk.Entry(
+            _search_frame, textvariable=self._search_var,
+            font=("", 9), width=16, relief=tk.SOLID, bd=1,
+            bg="#FFFFFF", fg=C_TEXT, insertbackground=C_TEXT)
+        self._search_entry.pack(side=tk.LEFT)
+        self._search_entry.insert(0, "")
+        # 占位提示
+        self._search_placeholder = "搜索任务名称…"
+        self._search_entry.insert(0, self._search_placeholder)
+        self._search_entry.config(fg=C_TEXT_DISABLED)
+        self._search_entry.bind("<FocusIn>", self._on_search_focus_in)
+        self._search_entry.bind("<FocusOut>", self._on_search_focus_out)
 
         # 中间占位
         tk.Frame(toolbar, bg=C_BG).pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -219,16 +220,20 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin):
                                      font=("", 9), fg=C_TEXT_MUTED, bg=C_BG)
         self._enabled_lbl.pack(side=tk.RIGHT, padx=(12, 0))
 
-        self._sched_btn = tk.Button(
-            toolbar, text="启动调度", font=("", 9),
-            fg=C_TEXT, bg="#FFFFFF", relief=tk.SOLID, bd=1,
-            activebackground=C_CARD_BG_ALT, padx=10, pady=5, cursor="hand2",
+        self._sched_btn = ttk.Button(
+            toolbar, text="启动调度", style="Outline.TButton",
             command=self._toggle_scheduler)
         self._sched_btn.pack(side=tk.RIGHT, padx=(6, 0))
 
-        # ---- 3. 卡片式任务列表（Canvas + Frame 滚动容器）----
-        list_outer = tk.Frame(self.root, bg=C_BG)
-        list_outer.pack(fill=tk.BOTH, expand=True, padx=14, pady=4)
+        # ---- 3. 卡片式任务列表 + 日志面板（PanedWindow 可拖拽分隔）----
+        self._pane = tk.PanedWindow(
+            self.root, orient=tk.VERTICAL, bg=C_BG,
+            sashwidth=4, sashrelief=tk.FLAT, borderwidth=0)
+        self._pane.pack(fill=tk.BOTH, expand=True, padx=14, pady=4)
+
+        # 上半区：卡片列表
+        list_outer = tk.Frame(self._pane, bg=C_BG)
+        self._pane.add(list_outer, minsize=120, stretch="always")
 
         self._task_canvas = tk.Canvas(list_outer, bg=C_BG, highlightthickness=0,
                                       bd=0, borderwidth=0)
@@ -291,9 +296,9 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin):
         _canvas.bind_all("<Button-4>", _on_wheel_btn45)
         _canvas.bind_all("<Button-5>", _on_wheel_btn45)
 
-        # ---- 4. 运行日志 ----
-        log_outer = tk.Frame(self.root, bg=C_BG)
-        log_outer.pack(fill=tk.X, side=tk.BOTTOM, padx=14, pady=(4, 4))
+        # ---- 4. 运行日志（PanedWindow 下半区，可拖拽调节高度）----
+        log_outer = tk.Frame(self._pane, bg=C_BG)
+        self._pane.add(log_outer, minsize=60, stretch="never")
 
         tk.Label(log_outer, text="运行日志", font=("", 9, "bold"),
                  fg=C_TEXT, bg=C_BG).pack(anchor="w")
@@ -303,7 +308,7 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin):
             font=("Consolas", 9), bg="#FFFFFF", fg=C_TEXT,
             relief=tk.SOLID, bd=1, highlightthickness=0,
             borderwidth=1)
-        self.log_text.pack(fill=tk.X, pady=(2, 0))
+        self.log_text.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
 
         # P1: 日志按级别着色（ERROR 红 / WARN 橙），提升扫读性
         self.log_text.tag_configure("error", foreground="#C62828")
@@ -333,12 +338,6 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin):
                                  bg=C_CARD_BG)
         self._ver_lbl.pack(side=tk.RIGHT, padx=12)
 
-        self._data_dir_lbl = tk.Label(self._status_bar,
-                                      text="数据: %s" % CONFIG_PATH,
-                                      font=("", 8), fg=C_TEXT_DISABLED,
-                                      bg=C_CARD_BG)
-        self._data_dir_lbl.pack(side=tk.RIGHT, padx=(0, 6))
-
     # ---- ttk.Style 配置 ----
     def _setup_style(self):
         # type: () -> None
@@ -349,24 +348,100 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin):
                 style.theme_use(theme)
                 break
 
-        # 卡片容器样式
+        # ---------- 字体约定 ----------
+        # F_NORMAL  = ("", 9)      # 正文
+        # F_BOLD    = ("", 9, "bold")  # 强调
+        # F_TITLE   = ("", 11, "bold") # 卡片标题
+        # F_SMALL   = ("", 8)      # 状态栏 / 辅助
+        # F_BRAND   = ("", 14, "bold") # 品牌名
+
+        # ---------- 卡片容器 ----------
         style.configure("Card.TFrame", background=C_CARD_BG,
                         relief=tk.SOLID, borderwidth=1)
         style.configure("CardSelected.TFrame", background=C_BRAND_LIGHT,
                         relief=tk.SOLID, borderwidth=1)
         style.configure("CardHost.TFrame", background=C_BG)
 
-        # 按钮统一（ttk 按钮样式覆盖全局默认）
-        style.configure("TButton", font=("", 9))
+        # ---------- TButton（全局默认） ----------
+        style.configure("TButton", font=("", 9), padding=4)
+        style.map("TButton",
+                  background=[("active", C_CARD_BG_ALT)])
+
+        # Accent：主色实心按钮（添加任务 / 运行 / 确认执行）
         style.configure("Accent.TButton", font=("", 9, "bold"),
                         background=C_BRAND, foreground="#FFFFFF",
-                        padding=8)
+                        padding=(12, 5))
         style.map("Accent.TButton",
+                  background=[("active", C_BRAND_DARK),
+                              ("disabled", C_TEXT_DISABLED)],
+                  foreground=[("disabled", "#FFFFFF")])
+
+        # Outline：白底描边按钮（编辑 / 运行全部 / 调度开关）
+        style.configure("Outline.TButton", font=("", 9),
+                        background="#FFFFFF", foreground=C_TEXT,
+                        relief=tk.SOLID, borderwidth=1, padding=(12, 5))
+        style.map("Outline.TButton",
+                  background=[("active", C_CARD_BG_ALT),
+                              ("disabled", C_BG)],
+                  foreground=[("disabled", C_TEXT_DISABLED)])
+
+        # Danger：删除按钮（红字白底）
+        style.configure("Danger.TButton", font=("", 9),
+                        background="#FFFFFF", foreground=C_DELETE,
+                        relief=tk.SOLID, borderwidth=1, padding=(12, 5))
+        style.map("Danger.TButton",
+                  background=[("active", "#FFEBEE")],
+                  foreground=[("disabled", C_TEXT_DISABLED)])
+
+        # BrandBtn：品牌栏内白字透明底（设置）
+        style.configure("Brand.TButton", font=("", 9),
+                        background=C_BRAND, foreground="#FFFFFF",
+                        relief=tk.FLAT, borderwidth=0, padding=(10, 6))
+        style.map("Brand.TButton",
                   background=[("active", C_BRAND_DARK)])
 
-        # Scrollbar 扁平
+        # ---------- TLabel ----------
+        style.configure("TLabel", font=("", 9), foreground=C_TEXT)
+        style.configure("Muted.TLabel", font=("", 9), foreground=C_TEXT_MUTED)
+        style.configure("Small.TLabel", font=("", 8), foreground=C_TEXT_MUTED)
+        style.configure("Title.TLabel", font=("", 11, "bold"), foreground=C_TEXT)
+        style.configure("Error.TLabel", font=("", 9), foreground=C_DELETE)
+        style.configure("Brand.TLabel", font=("", 14, "bold"),
+                        foreground="#FFFFFF", background=C_BRAND)
+        style.configure("BrandSub.TLabel", font=("", 10),
+                        foreground="#E0F2F1", background=C_BRAND)
+
+        # ---------- TLabelframe（对话框分组） ----------
+        style.configure("TLabelframe", font=("", 9))
+        style.configure("TLabelframe.Label", font=("", 9, "bold"))
+
+        # ---------- TNotebook（TaskDialog 选项卡） ----------
+        style.configure("TNotebook", background=C_BG)
+        style.configure("TNotebook.Tab", font=("", 9), padding=(12, 4))
+        style.map("TNotebook.Tab",
+                  background=[("selected", C_CARD_BG),
+                              ("!selected", C_BG)],
+                  foreground=[("selected", C_TEXT),
+                              ("!selected", C_TEXT_MUTED)])
+
+        # ---------- Treeview（DiffDialog 差异列表） ----------
+        style.configure("Treeview", font=("", 9), rowheight=24,
+                        background="#FFFFFF", fieldbackground="#FFFFFF")
+        style.configure("Treeview.Heading", font=("", 9, "bold"))
+        style.map("Treeview",
+                  background=[("selected", C_BRAND_LIGHT)],
+                  foreground=[("selected", C_TEXT)])
+
+        # ---------- TScrollbar ----------
         style.configure("Vertical.TScrollbar", background=C_BORDER,
                         troughcolor=C_BG, borderwidth=0, arrowsize=14)
+
+        # ---------- TCombobox / TEntry ----------
+        style.configure("TCombobox", font=("", 9))
+        style.configure("TEntry", font=("", 9))
+
+        # ---------- TSpinbox ----------
+        style.configure("TSpinbox", font=("", 9))
 
     # ==================================================================
     #  任务卡片列表刷新（替代原 self.tree 的 delete/insert/set）
@@ -487,6 +562,43 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin):
                 self._empty_lbl.pack_forget()
             except tk.TclError:
                 pass
+
+    # ---------- 搜索/筛选 ----------
+    def _on_search_focus_in(self, _evt=None):
+        # type: (object) -> None
+        if self._search_entry.get() == self._search_placeholder:
+            self._search_entry.delete(0, tk.END)
+            self._search_entry.config(fg=C_TEXT)
+
+    def _on_search_focus_out(self, _evt=None):
+        # type: (object) -> None
+        if not self._search_entry.get().strip():
+            self._search_entry.delete(0, tk.END)
+            self._search_entry.insert(0, self._search_placeholder)
+            self._search_entry.config(fg=C_TEXT_DISABLED)
+
+    def _on_search(self):
+        # type: () -> None
+        kw = self._search_var.get().strip()
+        if kw == self._search_placeholder:
+            kw = ""
+        self._apply_search_filter(kw)
+
+    def _apply_search_filter(self, keyword):
+        # type: (str) -> None
+        tasks = list(self.store.snapshot())
+        if not keyword:
+            for tid, card in self._task_rows.items():
+                card.pack(fill=tk.X, padx=2, pady=3)
+        else:
+            kw = keyword.lower()
+            for t in tasks:
+                if t.id in self._task_rows:
+                    card = self._task_rows[t.id]
+                    if kw in t.name.lower() or kw in t.source.lower() or kw in t.target.lower():
+                        card.pack(fill=tk.X, padx=2, pady=3)
+                    else:
+                        card.pack_forget()
 
     # ==================================================================
     #  选中 / 右键菜单 / 卡片操作入口
@@ -787,12 +899,14 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin):
     @staticmethod
     def _log_tag(source):
         # type: (str) -> Optional[str]
-        """从级别（或日志行内容）推断着色 tag；普通行返回 None。"""
-        s = source.upper()
-        if "ERROR" in s or "失败" in s or "异常" in s:
-            return "error"
-        if "WARN" in s or "警告" in s:
-            return "warn"
+        """从级别（或日志行内容）推断着色 tag；普通行返回 None。
+
+        仅匹配行首级别标签 [ERROR]/[WARN]，避免正文含"失败"等词
+        （如"成功 5 项，失败 0 项"）被误标红。
+        """
+        s = source.strip()
+        if s.startswith("[ERROR]") or s.startswith("[WARN]"):
+            return "error" if "[ERROR]" in s[:10] else "warn"
         return None
 
     def _append_log(self, line, level):

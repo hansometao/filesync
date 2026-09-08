@@ -90,52 +90,56 @@ class TaskCard(ttk.Frame):
                                   fg=C_TEXT_MUTED, bg=C_CARD_BG, anchor="w")
         self._mode_lbl.pack(side=tk.LEFT, padx=(8, 0), pady=(2, 0))
 
-        self._path_lbl = tk.Label(info, font=("", 9), fg=C_TEXT_MUTED,
+        # 路径 + 调度信息合并为一行（用 · 分隔）
+        detail_row = tk.Frame(info, style="Card.TFrame")
+        detail_row.pack(anchor=tk.W, fill=tk.X, pady=(2, 0))
+
+        self._path_lbl = tk.Label(detail_row, font=("", 9), fg=C_TEXT_MUTED,
                                   bg=C_CARD_BG, anchor="w")
-        self._path_lbl.pack(anchor="w", pady=(2, 0))
+        self._path_lbl.pack(side=tk.LEFT)
 
-        self._sched_lbl = tk.Label(info, font=("", 9), fg=C_TEXT_MUTED,
+        self._sched_sep = tk.Label(detail_row, text=" · ", font=("", 9),
+                                   fg=C_TEXT_DISABLED, bg=C_CARD_BG)
+        self._sched_sep.pack(side=tk.LEFT)
+
+        self._sched_lbl = tk.Label(detail_row, font=("", 9), fg=C_TEXT_MUTED,
                                    bg=C_CARD_BG, anchor="w")
-        self._sched_lbl.pack(anchor="w", pady=(2, 0))
+        self._sched_lbl.pack(side=tk.LEFT)
 
-        # ---- 右侧：状态 + 操作按钮 + 下次运行 ----
+        # ---- 右侧：上层=状态+下次运行，下层=操作按钮 ----
         right = ttk.Frame(self, style="Card.TFrame")
-        right.pack(side=tk.RIGHT)
+        right.pack(side=tk.RIGHT, padx=(8, 0))
 
-        # 下次运行（最右）
-        self._next_lbl = tk.Label(right, font=("", 9), fg=C_TEXT_MUTED,
+        # 上层：状态标记 + 下次运行（水平紧凑排列）
+        info_row = ttk.Frame(right, style="Card.TFrame")
+        info_row.pack(anchor=tk.E)
+
+        self._status_lbl = tk.Label(info_row, font=("", 10, "bold"),
+                                    bg=C_CARD_BG)
+        self._status_lbl.pack(side=tk.LEFT, padx=(0, 6))
+
+        self._next_lbl = tk.Label(info_row, font=("", 9), fg=C_TEXT_MUTED,
                                   bg=C_CARD_BG)
-        self._next_lbl.pack(side=tk.RIGHT, padx=(10, 0))
+        self._next_lbl.pack(side=tk.LEFT)
 
-        # 操作按钮组（运行 / 编辑 / 删除）
+        # 下层：操作按钮组（运行 / 编辑 / 删除）
         self._btn_frame = ttk.Frame(right, style="Card.TFrame")
-        self._btn_frame.pack(side=tk.RIGHT)
+        self._btn_frame.pack(anchor=tk.E, pady=(4, 0))
 
-        self._run_btn = tk.Button(
+        self._run_btn = ttk.Button(
             self._btn_frame, text="运行", width=6,
-            fg="#FFFFFF", bg=C_BRAND, activebackground=C_BRAND_DARK,
-            relief=tk.FLAT, bd=0, padx=8, pady=2, cursor="hand2",
-            command=self._on_run)
+            style="Accent.TButton", command=self._on_run)
         self._run_btn.pack(side=tk.LEFT, padx=(0, 4))
 
-        self._edit_btn = tk.Button(
+        self._edit_btn = ttk.Button(
             self._btn_frame, text="编辑", width=6,
-            fg=C_TEXT, bg="#FFFFFF", relief=tk.SOLID, bd=1,
-            activebackground=C_CARD_BG_ALT, padx=8, pady=2, cursor="hand2",
-            command=self._on_edit)
+            style="Outline.TButton", command=self._on_edit)
         self._edit_btn.pack(side=tk.LEFT, padx=(0, 4))
 
-        self._del_btn = tk.Button(
+        self._del_btn = ttk.Button(
             self._btn_frame, text="删除", width=6,
-            fg=C_DELETE, bg="#FFFFFF", relief=tk.SOLID, bd=1,
-            activebackground=C_CARD_BG_ALT, padx=8, pady=2, cursor="hand2",
-            command=self._on_delete)
+            style="Danger.TButton", command=self._on_delete)
         self._del_btn.pack(side=tk.LEFT)
-
-        # 状态标记（对勾 / 运行中 / -），位于操作按钮左侧
-        self._status_lbl = tk.Label(right, font=("", 10, "bold"),
-                                    bg=C_CARD_BG)
-        self._status_lbl.pack(side=tk.RIGHT, padx=(0, 8))
 
         # 右键菜单 / 选中 / 双击运行 绑定（整卡都响应）
         # C2 修复：_sw_canvas 必须从本循环剔除——tkinter bind 是替换语义，
@@ -212,6 +216,8 @@ class TaskCard(ttk.Frame):
             elif stype == "weekly" and task.schedule.weekdays:
                 days = "一二三四五六日"
                 sched_txt = "每周 %s" % " ".join(days[n - 1] for n in task.schedule.weekdays)
+            elif stype == "monthly" and task.schedule.monthdays:
+                sched_txt = "每月 %s 号" % ",".join(str(d) for d in task.schedule.monthdays)
             else:
                 sched_txt = "未安排定时"
             last_txt = "上次: %s" % (format_epoch(task.last_run) or "-")

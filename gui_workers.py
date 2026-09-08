@@ -332,7 +332,8 @@ class SyncFlowMixin(object):
         self._wait_bar.pack(padx=20, pady=6)
         self._wait_bar.start(80)
         if cancellable:
-            ttk.Button(self._wait, text="取消", command=self._on_cancel_wait).pack(pady=(0, 12))
+            ttk.Button(self._wait, text="取消", style="Outline.TButton",
+                       command=self._on_cancel_wait).pack(pady=(0, 12))
         try:
             self._wait.grab_set()   # 模态化，防止等待期间误操作主窗口
         except tk.TclError:

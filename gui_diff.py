@@ -13,6 +13,7 @@ from config import (
     CONFLICT_NEWER, CONFLICT_ASK, CONFLICT_POLICIES, Task, POLICY_LABELS,
 )
 from sync_engine import DiffResult
+from gui_tasklist import C_TEXT, C_TEXT_MUTED, C_DELETE, C_WARN
 
 _KIND_TAG = {
     "copy": "[+]",
@@ -66,16 +67,17 @@ class DiffDialog(tk.Toplevel):
 
     def _build(self):
         # type: () -> None
-        frm = ttk.Frame(self, padding=8)
+        frm = ttk.Frame(self, padding=10)
         frm.pack(fill=tk.BOTH, expand=True)
 
         info = "待执行动作（共 %d 项）：%s" % (len(self.diff.actions), self.diff.summary())
         has_conflict = bool(self.diff.conflict_count or self.diff.type_conflict_count)
-        ttk.Label(frm, text=info, foreground="#b00" if has_conflict else "#333").pack(anchor=tk.W, pady=(0, 6))
+        ttk.Label(frm, text=info, foreground=C_DELETE if has_conflict else C_TEXT,
+                  style="Title.TLabel" if has_conflict else "TLabel").pack(anchor=tk.W, pady=(0, 6))
         # 删除类动作强化警示（与冲突红色提示并列的二次防线）
         del_warn = deletion_warning_text(self.diff.delete_count, self.diff.rmdir_count)
         if del_warn:
-            ttk.Label(frm, text=del_warn, foreground="#b00").pack(anchor=tk.W)
+            ttk.Label(frm, text=del_warn, foreground=C_DELETE, style="Error.TLabel").pack(anchor=tk.W)
 
         cols = ("tag", "kind", "rel", "detail")
         # 差异列表可能上千条：Treeview + 垂直滚动条，保证可滚动查看全部
@@ -106,10 +108,11 @@ class DiffDialog(tk.Toplevel):
             shown += 1
         if len(self.diff.actions) > MAX_SHOW:
             ttk.Label(frm, text="（共 %d 条动作，仅显示前 %d 条；完整清单见日志）"
-                      % (len(self.diff.actions), MAX_SHOW), foreground="#666").pack(anchor=tk.W)
+                      % (len(self.diff.actions), MAX_SHOW),
+                      style="Muted.TLabel").pack(anchor=tk.W)
 
         if not self.diff.actions:
-            ttk.Label(frm, text="（无差异，无需同步）").pack(pady=10)
+            ttk.Label(frm, text="（无差异，无需同步）", style="Muted.TLabel").pack(pady=10)
 
         # 冲突策略选择
         # 有冲突且任务策略为 ask 时，默认预选"新版本胜出"，避免无选中项被静默回退
@@ -129,12 +132,14 @@ class DiffDialog(tk.Toplevel):
         elif self.diff.conflict_count > 0:
             ttk.Label(frm, text="冲突将按任务策略处理：%s（落败方会先备份为 .conflict-时间戳 副本）" %
                       POLICY_LABELS.get(self.task.conflict_policy, self.task.conflict_policy),
-                      foreground="#b00").pack(anchor=tk.W, pady=6)
+                      style="Error.TLabel").pack(anchor=tk.W, pady=6)
 
         btn = ttk.Frame(frm)
         btn.pack(fill=tk.X, pady=(8, 0))
-        ttk.Button(btn, text="确认执行", command=self._on_confirm).pack(side=tk.RIGHT, padx=4)
-        ttk.Button(btn, text="取消", command=self._on_cancel).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btn, text="取消", style="Outline.TButton",
+                   command=self._on_cancel).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btn, text="确认执行", style="Accent.TButton",
+                   command=self._on_confirm).pack(side=tk.RIGHT, padx=4)
 
     def _on_confirm(self):
         # type: () -> None

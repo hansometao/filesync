@@ -181,6 +181,93 @@ def prev_weekly_time(weekdays, times, before_epoch):
     return best
 
 
+def _monthday_count(year, month):
+    # type: (int, int) -> int
+    """某月的天数（闰年正确）。"""
+    import calendar
+    return calendar.monthrange(year, month)[1]
+
+
+def next_monthly_times(monthdays, times, from_epoch):
+    # type: (List[int], List[str], float) -> Optional[float]
+    """计算每月定时（monthdays 为 [1..31]）的下一次触发 epoch。
+
+    在选中的每个月几号 × 每个时刻组合中，取 >= from_epoch 的最近触发点；
+    超出当月天数的日期（如 2 月 31 号）自动跳过。
+    本月组合全部已过则取下月最早组合；monthdays/times 空或全部非法返回 None。
+    """
+    if not monthdays or not times:
+        return None
+    mds = sorted(int(d) for d in monthdays if 1 <= int(d) <= 31)
+    secs = []
+    for t in times:
+        s = _hms(t)
+        if s is not None:
+            secs.append(s)
+    secs.sort()
+    if not mds or not secs:
+        return None
+
+    struct = time.localtime(from_epoch)
+    y, m = struct.tm_year, struct.tm_mon
+    # 最多向前看 13 个月（保证一定能找到未来候选）
+    for _ in range(13):
+        max_day = _monthday_count(y, m)
+        for md in mds:
+            if md > max_day:
+                continue  # 超出当月天数（如 2 月 31 号），跳过
+            for s in secs:
+                try:
+                    cand = time.mktime((y, m, md, 0, 0, 0, 0, 0, -1)) + s
+                except (OverflowError, ValueError, OSError):
+                    continue
+                if cand >= from_epoch:
+                    return cand
+        # 顺延到下月
+        m += 1
+        if m > 12:
+            m = 1
+            y += 1
+    return None
+
+
+def prev_monthly_time(monthdays, times, before_epoch):
+    # type: (List[int], List[str], float) -> Optional[float]
+    """<= before_epoch 的最近一个每月触发点（回看 3 个月）。
+
+    用于 monthly 计划的停机补跑判定；monthdays/times 为空或全部非法返回 None。
+    """
+    if not monthdays or not times:
+        return None
+    mds = set(int(d) for d in monthdays if 1 <= int(d) <= 31)
+    secs = [s for s in (_hms(t) for t in times) if s is not None]
+    if not mds or not secs:
+        return None
+
+    struct = time.localtime(before_epoch)
+    y, m = struct.tm_year, struct.tm_mon
+    best = None  # type: Optional[float]
+    # 回看 3 个月（本月 + 过去 2 个月，覆盖跨年停机场景）
+    for _ in range(3):
+        max_day = _monthday_count(y, m)
+        for md in mds:
+            if md > max_day:
+                continue
+            for s in secs:
+                try:
+                    cand = time.mktime((y, m, md, 0, 0, 0, 0, 0, -1)) + s
+                except (OverflowError, ValueError, OSError):
+                    continue
+                if cand <= before_epoch and (best is None or cand > best):
+                    best = cand
+        # 退到上月
+        m -= 1
+        if m < 1:
+            m = 12
+            y -= 1
+    return best
+
+
 def _hms(t):
     # type: (str) -> Optional[int]
     try:

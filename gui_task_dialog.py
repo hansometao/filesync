@@ -6,7 +6,7 @@ from tkinter import ttk, filedialog, messagebox
 
 from config import (
     Task, MODE_ONE_WAY, MODE_TWO_WAY,
-    SCHED_INTERVAL, SCHED_DAILY, SCHED_WEEKLY,
+    SCHED_INTERVAL, SCHED_DAILY, SCHED_WEEKLY, SCHED_MONTHLY,
     validate_schedule_input,
     CONFLICT_NEWER, POLICY_LABELS,
 )
@@ -15,7 +15,10 @@ from typing import List, Optional
 # 下拉框显示中文标签，保存/加载时与内部值双向映射
 # （冲突策略标签统一取自 config.POLICY_LABELS，与差异预览对话框共用一份）
 _MODE_LABELS = {MODE_ONE_WAY: "单向镜像", MODE_TWO_WAY: "双向同步"}
-_SCHED_LABELS = {SCHED_INTERVAL: "间隔定时", SCHED_DAILY: "每日时刻", SCHED_WEEKLY: "每周时刻"}
+_SCHED_LABELS = {
+    SCHED_INTERVAL: "间隔定时", SCHED_DAILY: "每日时刻",
+    SCHED_WEEKLY: "每周时刻", SCHED_MONTHLY: "每月时刻",
+}
 _MODE_REV = {v: k for k, v in _MODE_LABELS.items()}
 _SCHED_REV = {v: k for k, v in _SCHED_LABELS.items()}
 _POLICY_REV = {v: k for k, v in POLICY_LABELS.items()}
@@ -94,6 +97,24 @@ def parse_weekdays_text(text):
     return weekdays
 
 
+def parse_monthdays_text(text):
+    # type: (str) -> List[int]
+    """解析月几输入（逗号分隔 1-31）。monthly 启用时 validate_schedule_input
+    已保证全为数字；其他类型/未启用时该栏残留的垃圾输入防御性忽略，绝不崩溃。"""
+    monthdays = []  # type: List[int]
+    for m in text.split(","):
+        m = m.strip()
+        if not m:
+            continue
+        try:
+            n = int(m)
+            if 1 <= n <= 31:
+                monthdays.append(n)
+        except ValueError:
+            pass
+    return monthdays
+
+
 class TaskDialog(tk.Toplevel):
     def __init__(self, parent, task, store):
         # type: (tk.Misc, Optional[Task], object) -> None
@@ -126,10 +147,15 @@ class TaskDialog(tk.Toplevel):
         outer = ttk.Frame(self, padding=10)
         outer.pack(fill=tk.BOTH, expand=True)
         outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(0, weight=1)
 
-        # ---- 基本信息 ----
-        basic = ttk.LabelFrame(outer, text="基本信息", padding=6)
-        basic.pack(fill=tk.X, pady=(0, 6))
+        # ---- 选项卡容器 ----
+        nb = ttk.Notebook(outer)
+        nb.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
+
+        # ---- Tab 1: 基本信息 ----
+        basic = ttk.Frame(nb, padding=8)
+        nb.add(basic, text=" 基本信息 ")
         basic.columnconfigure(1, weight=1)
         self._name = ttk.Entry(basic)
         self._src = ttk.Entry(basic)
@@ -139,13 +165,14 @@ class TaskDialog(tk.Toplevel):
         self._enabled = tk.BooleanVar(value=True)
         r = 0
         self._row(basic, r, "任务名称", self._name); r += 1
-        self._row(basic, r, "源目录", self._src, ttk.Button(basic, text="浏览", command=lambda: self._pick(self._src))); r += 1
-        self._row(basic, r, "目标目录", self._dst, ttk.Button(basic, text="浏览", command=lambda: self._pick(self._dst))); r += 1
+        self._row(basic, r, "源目录", self._src, ttk.Button(basic, text="浏览", style="Outline.TButton", command=lambda: self._pick(self._src))); r += 1
+        self._row(basic, r, "目标目录", self._dst, ttk.Button(basic, text="浏览", style="Outline.TButton", command=lambda: self._pick(self._dst))); r += 1
+        self._row(basic, r, "同步方向", self._mode); r += 1
         self._row(basic, r, "启用任务", ttk.Checkbutton(basic, text="启用（取消则暂停该任务）", variable=self._enabled)); r += 1
 
-        # ---- 同步选项 ----
-        sync = ttk.LabelFrame(outer, text="同步选项", padding=6)
-        sync.pack(fill=tk.X, pady=(0, 6))
+        # ---- Tab 2: 同步选项 ----
+        sync = ttk.Frame(nb, padding=8)
+        nb.add(sync, text=" 同步选项 ")
         sync.columnconfigure(1, weight=1)
         self._ow_del = tk.BooleanVar()
         self._tw_del = tk.BooleanVar()
@@ -154,14 +181,13 @@ class TaskDialog(tk.Toplevel):
         self._conflict = ttk.Combobox(sync, values=list(POLICY_LABELS.values()), state="readonly")
         self._conflict.set(POLICY_LABELS[CONFLICT_NEWER])
         r = 0
-        self._row(sync, r, "同步方向", self._mode); r += 1
         self._row(sync, r, "单向选项", self._ow_del_chk); r += 1
         self._row(sync, r, "双向选项", self._tw_del_chk); r += 1
         self._row(sync, r, "冲突策略", self._conflict); r += 1
 
-        # ---- 定时调度 ----
-        sched = ttk.LabelFrame(outer, text="定时调度", padding=6)
-        sched.pack(fill=tk.X, pady=(0, 6))
+        # ---- Tab 3: 定时调度 ----
+        sched = ttk.Frame(nb, padding=8)
+        nb.add(sched, text=" 定时调度 ")
         sched.columnconfigure(1, weight=1)
         self._sched_on = tk.BooleanVar()
         self._sched_type = ttk.Combobox(sched, values=list(_SCHED_LABELS.values()), state="readonly")
@@ -172,16 +198,21 @@ class TaskDialog(tk.Toplevel):
         self._times.insert(0, "08:00,20:00")
         self._weekdays = ttk.Entry(sched)
         self._weekdays.insert(0, "1,3,5")
+        self._monthdays = ttk.Entry(sched)
+        self._monthdays.insert(0, "1,15")
         r = 0
         self._row(sched, r, "启用定时", ttk.Checkbutton(sched, text="启用", variable=self._sched_on)); r += 1
         self._row(sched, r, "定时类型", self._sched_type); r += 1
         self._row(sched, r, "间隔(分钟)", self._interval); r += 1
         self._row(sched, r, "每日时刻", self._times); r += 1
         self._row(sched, r, "每周(1-7)", self._weekdays); r += 1
+        self._row(sched, r, "每月日期", self._monthdays); r += 1
+        ttk.Label(sched, text="提示：间隔仅用于「间隔定时」；每日时刻如 08:00,20:00；每周如 1,3,5；每月如 1,15").grid(
+            row=r, column=0, columnspan=3, sticky=tk.W, padx=4, pady=(4, 0))
 
-        # ---- 过滤规则 ----
-        filt = ttk.LabelFrame(outer, text="过滤规则", padding=6)
-        filt.pack(fill=tk.X, pady=(0, 6))
+        # ---- Tab 4: 过滤规则 ----
+        filt = ttk.Frame(nb, padding=8)
+        nb.add(filt, text=" 过滤规则 ")
         filt.columnconfigure(1, weight=1)
         self._include = ttk.Entry(filt)
         self._exclude = ttk.Entry(filt)
@@ -194,9 +225,11 @@ class TaskDialog(tk.Toplevel):
 
         # ---- 按钮 ----
         btn = ttk.Frame(outer)
-        btn.pack(fill=tk.X, pady=(6, 0))
-        ttk.Button(btn, text="保存", command=self._on_save).pack(side=tk.RIGHT, padx=4)
-        ttk.Button(btn, text="取消", command=self._on_cancel).pack(side=tk.RIGHT, padx=4)
+        btn.pack(fill=tk.X)
+        ttk.Button(btn, text="取消", style="Outline.TButton",
+                   command=self._on_cancel).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btn, text="保存", style="Accent.TButton",
+                   command=self._on_save).pack(side=tk.RIGHT, padx=4)
 
         # 双向联动：双向时禁用"单向删除目标多余"、启用"传播删除"；单向反之。
         # 保存逻辑已强制（one_way_delete 仅单向生效、two_way_delete 仅双向生效），
@@ -233,6 +266,8 @@ class TaskDialog(tk.Toplevel):
         self._times.insert(0, ",".join(task.schedule.times))
         self._weekdays.delete(0, tk.END)
         self._weekdays.insert(0, ",".join(str(w) for w in task.schedule.weekdays))
+        self._monthdays.delete(0, tk.END)
+        self._monthdays.insert(0, ",".join(str(m) for m in task.schedule.monthdays))
         self._include.delete(0, tk.END)
         self._include.insert(0, ",".join(task.include))
         self._exclude.delete(0, tk.END)
@@ -290,9 +325,11 @@ class TaskDialog(tk.Toplevel):
         # 注意：下拉框显示的是中文标签，必须先经 _SCHED_REV 还原内部值再校验——
         # 此前把标签直接传入，与 SCHED_DAILY 等内部值永不相等，校验形同虚设
         sched_type = _SCHED_REV.get(self._sched_type.get(), self._sched_type.get())
+        _md_text = self._monthdays.get() if hasattr(self, "_monthdays") else ""
         err = validate_schedule_input(
             bool(self._sched_on.get()), sched_type,
-            self._interval.get(), self._times.get(), self._weekdays.get())
+            self._interval.get(), self._times.get(), self._weekdays.get(),
+            _md_text)
         if err:
             messagebox.showerror("错误", err)
             return
@@ -310,6 +347,7 @@ class TaskDialog(tk.Toplevel):
         include = [t.strip() for t in self._include.get().split(",") if t.strip()]
         exclude = [t.strip() for t in self._exclude.get().split(",") if t.strip()]
         weekdays = parse_weekdays_text(self._weekdays.get())
+        monthdays = parse_monthdays_text(_md_text)
 
         if self.is_new:
             t = Task()
@@ -332,6 +370,7 @@ class TaskDialog(tk.Toplevel):
         t.schedule.interval_minutes = interval
         t.schedule.times = times
         t.schedule.weekdays = weekdays
+        t.schedule.monthdays = monthdays
         t.include = include
         t.exclude = exclude
         t.conflict_policy = _POLICY_REV.get(self._conflict.get(), self._conflict.get())

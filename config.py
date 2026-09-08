@@ -48,22 +48,25 @@ POLICY_LABELS = {
 SCHED_INTERVAL = "interval"
 SCHED_DAILY = "daily"
 SCHED_WEEKLY = "weekly"
+SCHED_MONTHLY = "monthly"
 
 # HH:MM 与周几(1-7)的格式校验正则：表单校验（validate_schedule_input）、
 # 表单解析（gui_task_dialog._on_save）与持久层清洗（Schedule.from_dict）共用一份
 HHMM_RE = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
 WEEKDAY_RE = re.compile(r"^[1-7]$")
+MONTHDAY_RE = re.compile(r"^(0?[1-9]|[12]\d|3[01])$")
 
 
-def validate_schedule_input(sched_enabled, sched_type, interval_text, times_text, weekdays_text):
-    # type: (bool, str, str, str, str) -> Optional[str]
-    """校验任务调度表单输入（interval / times / weekdays）。
+def validate_schedule_input(sched_enabled, sched_type, interval_text, times_text,
+                           weekdays_text, monthdays_text=""):
+    # type: (bool, str, str, str, str, str) -> Optional[str]
+    """校验任务调度表单输入（interval / times / weekdays / monthdays）。
 
     返回错误消息；None 表示合法。GUI（gui_task_dialog._on_save）与无头测试共用，
     把校验逻辑从 tkinter 层抽离以便无界面测试。只做校验不做解析，
     调用方在通过后按既有逻辑解析（格式已保证合法）。
     """
-    # 间隔仅 interval 类型使用：daily/weekly 下间隔栏可为空/任意值，
+    # 间隔仅 interval 类型使用：daily/weekly/monthly 下间隔栏可为空/任意值，
     # 不应因无关字段拦截保存（解析侧对非 interval 类型有兜底）
     if sched_enabled and sched_type == SCHED_INTERVAL:
         try:
@@ -72,16 +75,16 @@ def validate_schedule_input(sched_enabled, sched_type, interval_text, times_text
             return "间隔(分钟)必须是整数，当前值：%s" % interval_text
         if interval < 1:
             return "间隔(分钟)必须是正整数（>=1）"
-    # 时刻/周几的格式校验同样只对启用中的 daily/weekly 生效：
-    # interval 类型下这两栏的残留输入与当前任务无关，不应拦截保存
+    # 时刻/周几/月几的格式校验同样只对启用中的对应类型生效：
+    # interval 类型下这些栏的残留输入与当前任务无关，不应拦截保存
     # （解析侧同样只保留合法值，垃圾输入不会进入 Task）
-    if sched_enabled and sched_type in (SCHED_DAILY, SCHED_WEEKLY):
+    if sched_enabled and sched_type in (SCHED_DAILY, SCHED_WEEKLY, SCHED_MONTHLY):
         times = [t.strip() for t in times_text.split(",") if t.strip()]
         for t in times:
             if not HHMM_RE.match(t):
                 return "每日时刻格式应为 HH:MM（00:00-23:59），非法值：%s" % t
         if not times:
-            return "启用每日/每周定时时请至少填写一个时刻，如 08:00,20:00"
+            return "启用定时调度时请至少填写一个时刻，如 08:00,20:00"
         weekdays = []
         for w in [x.strip() for x in weekdays_text.split(",") if x.strip()]:
             if not WEEKDAY_RE.match(w):
@@ -89,6 +92,14 @@ def validate_schedule_input(sched_enabled, sched_type, interval_text, times_text
             weekdays.append(int(w))
         if sched_enabled and sched_type == SCHED_WEEKLY and not weekdays:
             return "启用每周定时时请至少填写一个周几，如 1,3,5（1=周一）"
+        # 每月：校验月几输入
+        monthdays = []
+        for m in [x.strip() for x in monthdays_text.split(",") if x.strip()]:
+            if not MONTHDAY_RE.match(m):
+                return "每月日期应为 1-31 的数字，非法值：%s" % m
+            monthdays.append(int(m))
+        if sched_enabled and sched_type == SCHED_MONTHLY and not monthdays:
+            return "启用每月定时时请至少填写一个日期，如 1,15（1=每月1号）"
     return None
 
 
@@ -115,10 +126,11 @@ def sync_identity_changed(prev_src, prev_dst, prev_mode, new_src, new_dst, new_m
 @dataclass
 class Schedule(object):
     enabled: bool = False
-    type: str = SCHED_INTERVAL          # interval | daily | weekly
+    type: str = SCHED_INTERVAL          # interval | daily | weekly | monthly
     interval_minutes: int = 60
     times: List[str] = field(default_factory=list)  # ["08:00", "20:00"]
     weekdays: List[int] = field(default_factory=list)  # weekly: [1..7] 1=周一
+    monthdays: List[int] = field(default_factory=list)  # monthly: [1..31]
 
     def to_dict(self):
         # type: () -> Dict[str, Any]
@@ -128,6 +140,7 @@ class Schedule(object):
             "interval_minutes": self.interval_minutes,
             "times": list(self.times),
             "weekdays": list(self.weekdays),
+            "monthdays": list(self.monthdays),
         }
 
     @classmethod
@@ -147,7 +160,7 @@ class Schedule(object):
             # 但直接调用 from_dict 的用户不应崩溃）
             d = {}
         stype = d.get("type", SCHED_INTERVAL)
-        if stype not in (SCHED_INTERVAL, SCHED_DAILY, SCHED_WEEKLY):
+        if stype not in (SCHED_INTERVAL, SCHED_DAILY, SCHED_WEEKLY, SCHED_MONTHLY):
             stype = SCHED_INTERVAL
         try:
             interval = int(d.get("interval_minutes", 60))
@@ -169,12 +182,23 @@ class Schedule(object):
                     continue
                 if 1 <= n <= 7 and n not in weekdays:
                     weekdays.append(n)
+        raw_md = d.get("monthdays", [])
+        monthdays = []  # type: List[int]
+        if isinstance(raw_md, list):
+            for m in raw_md:
+                try:
+                    n = int(m)
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= n <= 31 and n not in monthdays:
+                    monthdays.append(n)
         return cls(
             enabled=bool(d.get("enabled", False)),
             type=stype,
             interval_minutes=interval,
             times=times,
             weekdays=weekdays,
+            monthdays=monthdays,
         )
 
 

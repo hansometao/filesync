@@ -124,9 +124,9 @@ class TrayIcon(object):
         user32 = self._user32()
         kernel32 = getattr(ctypes, "windll").kernel32
         shell32 = getattr(ctypes, "windll").shell32
-        self._configure_api(user32, shell32, kernel32)
 
-        # WNDPROC/WNDCLASSW 依赖 Windows 专有的 WINFUNCTYPE，此处惰性定义
+        # WNDPROC/WNDCLASSW 依赖 Windows 专有的 WINFUNCTYPE，必须在
+        # _configure_api 之前定义（后者需要 WNDCLASSW 设置 argtypes）
         WNDPROC = ctypes.WINFUNCTYPE(  # type: ignore[attr-defined]  # typeshed 仅 Windows 暴露
             ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT,
             wintypes.WPARAM, wintypes.LPARAM)
@@ -144,6 +144,8 @@ class TrayIcon(object):
                 ("lpszMenuName", wintypes.LPCWSTR),
                 ("lpszClassName", wintypes.LPCWSTR),
             ]
+
+        self._configure_api(user32, shell32, kernel32)
 
         # 窗口类 + 消息专用隐藏窗口（HWND_MESSAGE：不进任务栏、不可见）
         self._callback_ref = WNDPROC(self._wnd_proc)
