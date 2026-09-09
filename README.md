@@ -80,9 +80,11 @@ python main.py --help          # 显示帮助
 本工具可打包成**单文件、无控制台（windowed）**的可执行文件，双击即启动 GUI。
 
 ### 打包相关文件
-- `build_exe.py`：一键打包脚本（跨平台）
-- `folder_sync.spec`：PyInstaller 打包配置（单文件 + 无控制台 + 图标）
+- `build.py`：一键打包脚本（版本同步 → 测试 → PyInstaller → 可选 Inno Setup）
+- `folder_sync.spec`：PyInstaller 打包配置（单文件 + 无控制台 + 图标 + 版本资源）
+- `core/meta.py`：版本号唯一来源（发版只改这里的 APP_VERSION）
 - `make_icon.py`：生成占位图标 `app.ico`（可替换为你的正式图标）
+- `installer.iss`：Inno Setup 安装包脚本（可选，需 `--installer`）
 
 ### 在 Windows 上生成 exe
 1. 在 **Windows 7 / Python 3.8.x** 环境安装打包工具：
@@ -93,9 +95,19 @@ python main.py --help          # 显示帮助
 2. （可选）为加速哈希可先 `pip install xxhash`。
 3. 运行：
    ```
-   python build_exe.py
+   python build.py
    ```
-4. 产物在 `dist/folder_sync.exe`（单文件，约 7~10 MB）。
+4. 产物在 `dist/folder_sync.exe`（单文件，约 7~10 MB），版本资源已同步 `core/meta.py` 的版本号。
+
+### 生成安装包（可选）
+1. 安装 [Inno Setup 6](https://jrsoftware.org/isinfo.php) 并把 `iscc` 加入 PATH。
+2. 运行：
+   ```
+   python build.py --installer
+   ```
+3. 产物在 `dist/installer/filesync-<版本>-setup.exe`；安装到用户目录
+   （无需管理员权限），升级沿用旧目录，`config/` 与 `logs/` 用户数据保留；
+   可勾选「开机自动启动」（注册表值与应用内「开机自启」同一键，可互相识别）。
 
 ### 打包后的行为
 - **GUI**：双击 `folder_sync.exe` 直接进入图形界面，无黑色控制台窗口。
@@ -175,8 +187,11 @@ folder_sync/
    gui_task_dialog.py # 新增/编辑任务
   gui_diff.py        # 差异预览/冲突处理
   test_sync.py       # 无界面自测
-  build_exe.py       # 一键打包脚本（跨平台）
+  core/              # 应用元信息（meta.py：版本号唯一来源）
+  build.py           # 一键打包脚本（版本同步→测试→PyInstaller→可选Inno）
   folder_sync.spec   # PyInstaller 打包配置
+  version_info.txt   # Windows 版本资源（build.py 自动重写）
+  installer.iss      # Inno Setup 安装包脚本（可选）
   make_icon.py       # 生成占位图标 app.ico
   requirements.txt
   README.md

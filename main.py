@@ -44,10 +44,11 @@ _HELP = """文件夹同步备份工具
 退出码: 0=成功/已列出  1=未找到或已禁用  2=部分失败  3=同步异常
 """
 
-# 应用版本号：GUI 标题栏与帮助文案共用一份，避免多处硬编码漂移。
-# 放在 main 顶层：gui_app 可安全 `from main import APP_VERSION`
-# （main 对 gui_app 是函数内惰性导入，不存在循环导入）。
-APP_VERSION = "1.1"
+# 应用版本号：版本号唯一来源为 core/meta.py，main 顶层仅做再导出，
+# 供 gui_app `from main import APP_VERSION` 使用（main 对 gui_app 是
+# 函数内惰性导入，不存在循环导入）。发版只改 core/meta.py。
+# 兼容旧导入路径：from main import APP_VERSION 仍可用。
+from core.meta import APP_VERSION  # noqa: F401  再导出，保持外部导入不变
 
 
 def _print_help():

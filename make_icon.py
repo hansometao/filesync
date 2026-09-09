@@ -5,7 +5,7 @@
 Windows 端 PyInstaller 会读取该 .ico 作为 exe 图标；Linux 端仅作占位。
 
 Pillow 为惰性导入（仅在 make_icon() 内）：缺 Pillow 时模块可正常导入，
-调用 make_icon() 才抛 ImportError——build_exe 会捕获并给出安装提示，
+调用 make_icon() 才抛 ImportError——build.py 会捕获并给出安装提示，
 而不是让打包脚本裸崩溃。
 
 用法：

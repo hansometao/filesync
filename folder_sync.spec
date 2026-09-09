@@ -2,7 +2,7 @@
 """PyInstaller 打包配置：单文件（onefile）+ 无控制台（windowed）。
 
 用法：
-    pyinstaller folder_sync.spec        # 或：python build_exe.py
+    pyinstaller folder_sync.spec        # 或：python build.py
 
 产物：
     dist/folder_sync(.exe)  —— 单文件、双击无黑窗（GUI）；
@@ -12,16 +12,20 @@
   - console=False 即 windowed（Windows 下无控制台窗口，Linux 下无影响）。
   - 图标仅 Windows 生效（icon 参数），Linux 下忽略。
   - 可选依赖 xxhash 缺失时 PyInstaller 仅告警、不会失败（代码有 hashlib 回退）。
+  - version=version_info.txt 挂 Windows 版本资源（由 build.py 依据
+    core/meta.py 的 APP_VERSION 自动重写，勿手改）。
 """
 
 import os
 import sys
 
-# spec 文件所在目录（SPECPATH 为 PyInstaller 注入的全局）：datas/icon 用
-# 绝对路径，避免"直接 pyinstaller folder_sync.spec（其他目录）"时相对
-# 路径解析失败（此前 pathex=[] 且 app.ico 依赖 cwd，仅 build_exe 的
-# cwd=HERE 掩盖了该假设）
-SPEC_DIR = os.path.dirname(os.path.abspath(SPECPATH))
+# spec 文件所在目录（SPECPATH 为 PyInstaller 注入的全局）：datas/icon/version
+# 用绝对路径，避免"直接 pyinstaller folder_sync.spec（其他目录）"时相对路径
+# 解析失败。注意 PyInstaller 5.x 的 SPECPATH 是 spec 所在**目录**而非 spec
+# 文件路径——再套 dirname 会错算到上级目录（曾致 main.py 找不到）；
+# 兼容旧语义（spec 文件路径）做双分支
+_SP = os.path.abspath(SPECPATH)
+SPEC_DIR = _SP if os.path.isdir(_SP) else os.path.dirname(_SP)
 ICO_PATH = os.path.join(SPEC_DIR, "app.ico")
 
 block_cipher = None
@@ -60,4 +64,7 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     icon=ICO_PATH if sys.platform == 'win32' else None,
+    # Windows 版本资源：由 build.py 依据 core/meta.py 的 APP_VERSION 自动重写。
+    # version 参数在非 Windows 平台同样被 PyInstaller 接受（Linux 产物无影响）。
+    version=os.path.join(SPEC_DIR, 'version_info.txt'),
 )
