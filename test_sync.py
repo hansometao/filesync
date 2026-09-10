@@ -1697,6 +1697,35 @@ def test_33_tray_autostart():
         except Exception as e:
             check(False, "非 Windows 托盘异常类型: %s" % e)
 
+    # 回归（Win7 托盘启动失败）：_configure_api 曾引用 _create 的局部类
+    # WNDCLASSW，导致 Windows 上托盘每次创建必抛 NameError（被 _init_tray
+    # 吞掉后静默降级，托盘永远出不来）。用假 DLL 直接调 _configure_api，
+    # 断言不再有作用域错误；非 Windows 需补 WINFUNCTYPE 占位（仅本节用）。
+    import ctypes as _ctypes33
+
+    class _FakeDLL33(object):
+        def __getattr__(self, name):
+            import types as _t
+            return _t.SimpleNamespace(restype=None, argtypes=None)
+
+    _saved_wfp = getattr(_ctypes33, "WINFUNCTYPE", None)
+    if _saved_wfp is None:
+        # 非 Windows：用 CFUNCTYPE 占位（同为指针宽度函数原型，
+        # 可作 Structure _fields_ 的 C 类型，语义足以覆盖本回归）
+        _ctypes33.WINFUNCTYPE = (
+            lambda restype, *argtypes: _ctypes33.CFUNCTYPE(restype, *argtypes))  # type: ignore[attr-defined]
+    try:
+        _ti33 = _tray.TrayIcon.__new__(_tray.TrayIcon)
+        _ti33._configure_api(_FakeDLL33(), _FakeDLL33(), _FakeDLL33())
+        check(True, "33: _configure_api 可独立调用（WNDCLASSW 作用域回归）")
+    except NameError as e:
+        check(False, "33: _configure_api NameError（Win7 托盘启动失败回归）: %s" % e)
+    except Exception as e:
+        check(False, "33: _configure_api 异常 %s: %s" % (type(e).__name__, e))
+    finally:
+        if _saved_wfp is None:
+            del _ctypes33.WINFUNCTYPE  # type: ignore[attr-defined]
+
     check(_autostart.is_supported() == (sys.platform in ("win32", "linux", "darwin")),
           "autostart.is_supported 与平台一致")
 

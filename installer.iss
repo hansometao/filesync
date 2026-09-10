@@ -4,8 +4,10 @@
 ; 需 Inno Setup 6（https://jrsoftware.org/isinfo.php）
 ; 产物：dist\installer\filesync-<版本>-setup.exe
 
+; 版本号必须由外部传入（build.py --installer 自动传 /DMyAppVersion=<core/meta.py 的 APP_VERSION>）。
+; 不再提供硬编码兜底：兜底值会随版本演进而漂移，导致安装包版本与 exe 版本资源不一致。
 #ifndef MyAppVersion
-  #define MyAppVersion "1.1.0"
+  #error "缺少版本号：请用 iscc /DMyAppVersion=x.y.z installer.iss，或直接运行 python build.py --installer"
 #endif
 
 #define MyAppName "filesync"

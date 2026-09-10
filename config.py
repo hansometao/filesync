@@ -590,9 +590,12 @@ class TaskStore(object):
 
     def get(self, task_id):
         # type: (str) -> Optional[Task]
-        for t in self.tasks:
-            if t.id == task_id:
-                return t
+        # 遍历须持锁：与 add/remove 的原地列表修改并发时
+        # 会抛 RuntimeError: list changed size during iteration
+        with self._lock:
+            for t in self.tasks:
+                if t.id == task_id:
+                    return t
         return None
 
     def snapshot(self):

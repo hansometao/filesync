@@ -229,8 +229,10 @@ def _handle_file(ctx, entry, root, name, rel):
     if ctx.progress is not None:
         try:
             ctx.progress(rel)
-        except Exception:
-            pass
+        except Exception as e:
+            # 进度回调是可视化增强，失败不影响扫描；但不能完全静默，
+            # 否则回调侧 bug 无从排查
+            get_logger().debug("进度回调异常(已忽略): %s" % e)
 
 
 def _recurse(ctx, root, rel_prefix):

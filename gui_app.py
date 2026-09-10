@@ -84,6 +84,7 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin):
         self._closing = False
         self._tick_id = None               # type: Optional[str]
         self._drain_id = None              # type: Optional[str]
+        self._draining = False             # _drain_ui_queue 防重入守卫
         self._ui_queue = queue.Queue()  # type: queue.Queue[Any]
 
         self._workers = []                 # type: List[threading.Thread]
@@ -128,19 +129,29 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin):
             self._drain_id = self.root.after(100, self._drain_ui_queue)
         except tk.TclError:
             return
-        for _ in range(100):
-            try:
-                fn = self._ui_queue.get_nowait()
-            except queue.Empty:
-                break
-            try:
-                fn()
-            except Exception:
-                import traceback
+        # 防重入守卫：wait_window/grab_set 等会进入嵌套事件循环，此时
+        # 已排定的 after 仍会触发，两个 drain 交错消费同一队列会导致
+        # 回调乱序（如 hide_wait 先于 popup 执行）。嵌套期间跳过本轮，
+        # 外层 drain 返回后下一轮继续处理——保持单一消费者顺序。
+        if self._draining:
+            return
+        self._draining = True
+        try:
+            for _ in range(100):
                 try:
-                    self.logger.error("UI 回调执行异常: " + traceback.format_exc())
+                    fn = self._ui_queue.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    fn()
                 except Exception:
-                    pass
+                    import traceback
+                    try:
+                        self.logger.error("UI 回调执行异常: " + traceback.format_exc())
+                    except Exception:
+                        pass
+        finally:
+            self._draining = False
 
     # ==================================================================
     #  UI 构建 —— 品牌栏 + 工具栏 + Canvas 卡片列表 + 运行日志 + 状态栏

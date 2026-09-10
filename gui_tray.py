@@ -36,6 +36,7 @@ class TrayMenuMixin(object):
     logger = None               # type: AppLogger
     _tray = None                # type: Optional[Any]  # noqa: E501  (tray_mod.TrayIcon)
     _tray_hidden = False        # type: bool
+    _tray_hint_shown = False    # type: bool  # 首次隐藏到托盘的气泡提示已展示
     _quitting = False           # type: bool
     _closing = False            # type: bool
     if TYPE_CHECKING:  # 方法契约仅类型层：类级赋值会按 MRO 遮蔽其他混入的真实现
@@ -105,6 +106,18 @@ class TrayMenuMixin(object):
                 self.root.withdraw()
             except tk.TclError:
                 self._tray_hidden = False
+            else:
+                # 首次隐藏时气泡告知后台状态：点 X 直接消失易被误认为
+                # 已退出，仅首次提示（不每次打扰），失败静默（气泡非关键）
+                if not self._tray_hint_shown:
+                    self._tray_hint_shown = True
+                    try:
+                        self._tray.notify(
+                            "filesync 仍在后台运行",
+                            "已最小化到系统托盘，定时同步照常执行。\n"
+                            "单击托盘图标恢复窗口，右键菜单可退出。")
+                    except Exception:
+                        pass
         else:
             # 非 Windows 无托盘：弹确认框告知后台运行状态与退出路径
             self._ask_minimize_or_quit()

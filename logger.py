@@ -121,7 +121,13 @@ class AppLogger(object):
             self._file.write(line + "\n")
             self._file.flush()
             self._bytes_written += len(line.encode("utf-8")) + 1
-        except OSError:
+        except OSError as e:
+            # 日志盘满/文件被占用等：不能写也不能在此递归记日志（会再次
+            # 触发写失败），仅向 stderr 报告一次事实，避免完全不可感知
+            try:
+                sys.stderr.write("日志写入失败(本次丢弃): %s\n" % e)
+            except Exception:
+                pass
             return
         if self._bytes_written > _MAX_FILE_BYTES:
             self._rotate()

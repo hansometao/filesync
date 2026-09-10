@@ -49,6 +49,7 @@ class SyncFlowMixin(object):
     _wait_label = None          # type: Optional[ttk.Label]
     _wait_prog = None           # type: Optional[ttk.Label]
     _wait_bar = None            # type: Optional[ttk.Progressbar]
+    _wait_cancel_btn = None     # type: Optional[ttk.Button]
     _wait_cancellable = False   # type: bool
     _wait_gen = 0               # type: int
     _prog_count = 0             # type: int
@@ -313,6 +314,22 @@ class SyncFlowMixin(object):
                 if self._wait.winfo_exists():
                     assert self._wait_label is not None  # 有等待窗则必有标签
                     self._wait_label.config(text=msg)
+                    # 复用分支同样要同步可取消状态：前次不可取消 + 本次可取消时
+                    # 若沿用旧窗，用户将没有"取消"按钮（反之则残留失效按钮）。
+                    # 需销毁旧按钮再按需重建（Tk 无法直接增删 pack 内容）。
+                    self._wait_cancellable = cancellable
+                    if self._wait_cancel_btn is not None:
+                        try:
+                            if self._wait_cancel_btn.winfo_exists():
+                                self._wait_cancel_btn.destroy()
+                        except tk.TclError:
+                            pass
+                        self._wait_cancel_btn = None
+                    if cancellable:
+                        self._wait_cancel_btn = ttk.Button(
+                            self._wait, text="取消", style="Outline.TButton",
+                            command=self._on_cancel_wait)
+                        self._wait_cancel_btn.pack(pady=(0, 12))
                     return
             except tk.TclError:
                 pass
@@ -331,9 +348,12 @@ class SyncFlowMixin(object):
         self._wait_bar = ttk.Progressbar(self._wait, mode="indeterminate", length=280)
         self._wait_bar.pack(padx=20, pady=6)
         self._wait_bar.start(80)
+        self._wait_cancel_btn = None
         if cancellable:
-            ttk.Button(self._wait, text="取消", style="Outline.TButton",
-                       command=self._on_cancel_wait).pack(pady=(0, 12))
+            self._wait_cancel_btn = ttk.Button(
+                self._wait, text="取消", style="Outline.TButton",
+                command=self._on_cancel_wait)
+            self._wait_cancel_btn.pack(pady=(0, 12))
         try:
             self._wait.grab_set()   # 模态化，防止等待期间误操作主窗口
         except tk.TclError:
@@ -380,4 +400,5 @@ class SyncFlowMixin(object):
             self._wait_label = None
             self._wait_prog = None
             self._wait_bar = None
+            self._wait_cancel_btn = None
             self._wait_cancellable = False

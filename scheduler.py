@@ -206,7 +206,11 @@ class Scheduler(object):
         try:
             self.run_task(task)
         except Exception as e:  # 保护调度线程
-            self.logger.error("任务执行异常 [%s]: %s" % (task.name, e))
+            # traceback 全量落日志：仅 "%s" % e 会丢失出错堆栈，任务
+            # 间歇性失败时无从定位
+            import traceback
+            self.logger.error("任务执行异常 [%s]: %s\n%s"
+                              % (task.name, e, traceback.format_exc()))
         finally:
             with self._lock:
                 self._running.discard(task_id)

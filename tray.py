@@ -81,8 +81,39 @@ class NOTIFYICONDATAW(ctypes.Structure):
 
 
 # WNDPROC / WNDCLASSW 依赖 Windows 专有的 ctypes.WINFUNCTYPE（stdcall 回调），
-# 非 Windows 平台不存在该 API——因此惰性定义在 _create() 中（仅 Win32 执行），
+# 非 Windows 平台不存在该 API——因此惰性构建（仅 Win32 执行，进程内缓存），
 # 保证本模块在任意平台可导入（非 Windows 仅 is_supported() 返回 False）。
+# 必须放在模块级供 _create 与 _configure_api 共用：此前定义为 _create 的
+# 局部类，_configure_api 引用时抛 NameError，导致 Windows 上托盘创建必败
+# （被 _init_tray 吞掉后静默降级，托盘永远出不来）。
+_wndclass_cache = None  # type: Optional[Tuple[Any, Any]]  # (WNDPROC, WNDCLASSW)
+
+
+def _win_wndclass():
+    # type: () -> Tuple[Any, Any]
+    """惰性构建并缓存 (WNDPROC, WNDCLASSW)；仅 Win32 运行时调用。"""
+    global _wndclass_cache
+    if _wndclass_cache is None:
+        WNDPROC = ctypes.WINFUNCTYPE(  # type: ignore[attr-defined]  # typeshed 仅 Windows 暴露
+            ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT,
+            wintypes.WPARAM, wintypes.LPARAM)
+
+        class WNDCLASSW(ctypes.Structure):
+            _fields_ = [
+                ("style", wintypes.UINT),
+                ("lpfnWndProc", WNDPROC),
+                ("cbClsExtra", ctypes.c_int),
+                ("cbWndExtra", ctypes.c_int),
+                ("hInstance", wintypes.HINSTANCE),
+                ("hIcon", wintypes.HICON),
+                ("hCursor", wintypes.HANDLE),
+                ("hbrBackground", wintypes.HBRUSH),
+                ("lpszMenuName", wintypes.LPCWSTR),
+                ("lpszClassName", wintypes.LPCWSTR),
+            ]
+
+        _wndclass_cache = (WNDPROC, WNDCLASSW)
+    return _wndclass_cache
 
 
 def is_supported():
@@ -125,25 +156,9 @@ class TrayIcon(object):
         kernel32 = getattr(ctypes, "windll").kernel32
         shell32 = getattr(ctypes, "windll").shell32
 
-        # WNDPROC/WNDCLASSW 依赖 Windows 专有的 WINFUNCTYPE，必须在
-        # _configure_api 之前定义（后者需要 WNDCLASSW 设置 argtypes）
-        WNDPROC = ctypes.WINFUNCTYPE(  # type: ignore[attr-defined]  # typeshed 仅 Windows 暴露
-            ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT,
-            wintypes.WPARAM, wintypes.LPARAM)
-
-        class WNDCLASSW(ctypes.Structure):
-            _fields_ = [
-                ("style", wintypes.UINT),
-                ("lpfnWndProc", WNDPROC),
-                ("cbClsExtra", ctypes.c_int),
-                ("cbWndExtra", ctypes.c_int),
-                ("hInstance", wintypes.HINSTANCE),
-                ("hIcon", wintypes.HICON),
-                ("hCursor", wintypes.HANDLE),
-                ("hbrBackground", wintypes.HBRUSH),
-                ("lpszMenuName", wintypes.LPCWSTR),
-                ("lpszClassName", wintypes.LPCWSTR),
-            ]
+        # WNDPROC/WNDCLASSW 惰性构建（模块级，供 _configure_api 共用；
+        # 此前为局部类导致 _configure_api 引用 NameError，见模块头注释）
+        WNDPROC, WNDCLASSW = _win_wndclass()
 
         self._configure_api(user32, shell32, kernel32)
 
@@ -229,9 +244,7 @@ class TrayIcon(object):
         shell32.Shell_NotifyIconW.restype = wintypes.BOOL
 
         # ---- 参数类 argtypes：句柄/指针一律用指针宽度类型 ----
-        WNDPROC = ctypes.WINFUNCTYPE(
-            ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT,
-            wintypes.WPARAM, wintypes.LPARAM)
+        WNDPROC, WNDCLASSW = _win_wndclass()
         user32.DefWindowProcW.argtypes = [
             wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
         user32.RegisterClassW.argtypes = [ctypes.POINTER(WNDCLASSW)]

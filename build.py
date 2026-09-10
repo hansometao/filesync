@@ -224,6 +224,28 @@ def run_pyinstaller():
     return out
 
 
+def run_smoke_test(out):
+    # type: (str) -> None
+    """打包产物最小启动冒烟：运行 `exe --list`，能正常启动并退出才算打包成功。
+
+    此前打包流程不运行产物，导入期错误（如缺模块/语法错误）打包成功却
+    无法启动，只能在目标机上暴露。--list 是无头路径：不进 GUI 主循环、
+    无任务时退出码 0（run_cli），失败（退出码非 0/超时/无法启动）则
+    整体打包中止并回滚到旧产物语义（此处直接报错退出，dist 内产物
+    已被 PyInstaller 覆盖，提示用户查看日志）。
+    """
+    print('      冒烟测试：%s --list' % os.path.relpath(out, ROOT))
+    try:
+        rc = subprocess.call([out, '--list'], cwd=ROOT, timeout=120)
+    except subprocess.TimeoutExpired:
+        sys.exit('冒烟测试失败：产物 --list 超时（120s），疑似启动卡死，打包中止。')
+    except OSError as e:
+        sys.exit('冒烟测试失败：无法运行产物 %s（%s），打包中止。' % (out, e))
+    if rc != 0:
+        sys.exit('冒烟测试失败：产物 --list 退出码 %d（预期 0），打包中止。' % rc)
+    print('      冒烟测试通过')
+
+
 def run_installer():
     # type: () -> None
     """用 Inno Setup 生成安装包（需 iscc 在 PATH 中，仅 Windows 有意义）"""
@@ -263,6 +285,7 @@ def main():
     else:
         print('[1/4] 已跳过无头自测（--skip-tests）')
     out = run_pyinstaller()
+    run_smoke_test(out)
     if args.installer:
         run_installer()
     else:
