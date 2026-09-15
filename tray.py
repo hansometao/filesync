@@ -200,9 +200,11 @@ class TrayIcon(object):
             if not shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)):
                 raise ctypes.WinError()  # type: ignore[attr-defined]
             # 注册 TaskbarCreated 广播消息号（值因会话而异，必须运行时注册）：
-            # explorer 重启后收到该消息须重新 NIM_ADD，否则图标永久消失
-            self._taskbar_created_msg = user32.RegisterWindowMessageW(
-                "TaskbarCreated")
+            # explorer 重启后收到该消息须重新 NIM_ADD，否则图标永久消失。
+            # 注册失败返回 0：0 恰为 WM_NULL，存 0 会让任意 WM_NULL 广播
+            # 误触发重挂，须存 None 使 _wnd_proc 的匹配分支不生效
+            self._taskbar_created_msg = (
+                user32.RegisterWindowMessageW("TaskbarCreated") or None)
             # 协商版本：请求 V3 让托盘交互行为与 Win7+ 一致（V3 下左键单击
             # 以 WM_LBUTTONUP 原始鼠标消息送达回调，而非 NIN_SELECT 通知——
             # NIN_SELECT 仅 V4 键盘选择/低版本命中，保留处理分支作为防御）。
