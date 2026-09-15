@@ -147,6 +147,9 @@ class TrayIcon(object):
         self._icon_owned = False     # 图标是否自有（LoadImageW 文件加载，可 DestroyIcon）
         self._callback_ref = None    # type: Optional[Any]  # 防止 WNDPROC 被 GC
         self._nid = None             # type: Optional[NOTIFYICONDATAW]
+        # TaskbarCreated 广播消息号：explorer.exe 崩溃/重启后系统会广播该消息，
+        # 未重新 NIM_ADD 的托盘图标被移除且不自动恢复；收到后须重新挂图标
+        self._taskbar_created_msg = None  # type: Optional[int]
         self._create(title, icon_path)
 
     # ---------- 生命周期 ----------
@@ -196,6 +199,10 @@ class TrayIcon(object):
 
             if not shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)):
                 raise ctypes.WinError()  # type: ignore[attr-defined]
+            # 注册 TaskbarCreated 广播消息号（值因会话而异，必须运行时注册）：
+            # explorer 重启后收到该消息须重新 NIM_ADD，否则图标永久消失
+            self._taskbar_created_msg = user32.RegisterWindowMessageW(
+                "TaskbarCreated")
             # 协商版本：请求 V3 让托盘交互行为与 Win7+ 一致（V3 下左键单击
             # 以 WM_LBUTTONUP 原始鼠标消息送达回调，而非 NIN_SELECT 通知——
             # NIN_SELECT 仅 V4 键盘选择/低版本命中，保留处理分支作为防御）。
@@ -232,6 +239,8 @@ class TrayIcon(object):
         # 返回值/布尔/原子类
         user32.DefWindowProcW.restype = ctypes.c_ssize_t   # LRESULT
         user32.RegisterClassW.restype = wintypes.ATOM
+        user32.RegisterWindowMessageW.restype = wintypes.UINT
+        user32.RegisterWindowMessageW.argtypes = [wintypes.LPCWSTR]
         user32.TrackPopupMenu.restype = wintypes.UINT
         user32.SetForegroundWindow.restype = wintypes.BOOL
         user32.AttachThreadInput.restype = wintypes.BOOL
@@ -412,6 +421,21 @@ class TrayIcon(object):
                     get_logger().error("托盘回调异常: %s" % sys.exc_info()[1])
                 except Exception:
                     pass
+        elif (self._taskbar_created_msg is not None
+                and msg == self._taskbar_created_msg):
+            # explorer 重启广播：托盘图标已被系统移除，重新 NIM_ADD。
+            # 图标句柄仍有效（自有句柄未销毁），无需重新 LoadImage。
+            # 失败仅记录日志：极端情况下图标回不来，降级为无托盘运行。
+            if self._nid is not None:
+                try:
+                    shell32 = getattr(ctypes, "windll").shell32
+                    if not shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(self._nid)):
+                        self.logger.warn("explorer 重启后托盘图标重挂失败")
+                except Exception as e:
+                    try:
+                        self.logger.warn("explorer 重启后托盘图标重挂异常: %s" % e)
+                    except Exception:
+                        pass
         return self._user32().DefWindowProcW(hwnd, msg, wparam, lparam)
 
     def _show_menu(self):

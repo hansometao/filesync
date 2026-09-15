@@ -49,7 +49,7 @@ class TrayMenuMixin(object):
         """菜单栏「文件」：最小化到后台 / 开机自启 / 退出（全平台可用）。"""
         menubar = tk.Menu(self.root)
         file_menu = tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="最小化到后台", command=self._hide_to_background)
+        file_menu.add_command(label="最小化到后台", command=self._on_menu_minimize)
         self._autostart_var = tk.BooleanVar(value=autostart.is_enabled())
         file_menu.add_checkbutton(label="开机自启", variable=self._autostart_var,
                                   command=self._toggle_autostart)
@@ -91,6 +91,24 @@ class TrayMenuMixin(object):
             self._restore_from_tray()
         elif item_id == 2:
             self._request_quit()
+
+    def _on_menu_minimize(self):
+        # type: () -> None
+        """菜单栏"最小化到后台"入口：无托盘平台直接最小化，不弹确认框。
+
+        _ask_minimize_or_quit 的三选一文案是写给"点 X 关闭"场景的
+        （含"否→退出程序"分支）；用户主动点菜单"最小化到后台"意图明确，
+        直接最小化即可，弹出含退出选项的确认框语义错位。
+        """
+        if self._tray is not None:
+            self._hide_to_background()
+            return
+        if self._closing:
+            return
+        try:
+            self.root.iconify()
+        except tk.TclError:
+            pass
 
     def _hide_to_background(self):
         # type: () -> None

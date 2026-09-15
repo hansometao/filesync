@@ -175,6 +175,14 @@ def main():
     import tkinter as tk
     from tkinter import ttk
     from gui_app import App
+    import singleinstance
+
+    # 单实例防护（仅 GUI 路径；--list/--sync 无头模式不受限，可与 GUI 共存）：
+    # 已有实例时唤起其主窗口后退出本进程，避免双实例并发写坏配置/重复调度
+    if not singleinstance.acquire_single_instance():
+        singleinstance.notify_existing_instance()
+        print("filesync 已在运行，已唤起其主窗口。")
+        sys.exit(0)
 
     # Windows 高 DPI 适配：声明 DPI 感知后系统不再对窗口做位图拉伸，
     # 文字在高分屏上保持锐利。Win 8.1+ 用 SetProcessDpiAwareness，
@@ -202,6 +210,10 @@ def main():
         pass
 
     app = App(root, autostart=autostart)
+    # 唤起监听：第二实例请求时经 UI 队列在主线程恢复窗口（_restore_from_tray
+    # 同时负责 deiconify/lift/focus_force 与 _tray_hidden 复位，幂等可复用）
+    singleinstance.start_wakeup_listener(
+        lambda: app._ui_put(app._restore_from_tray))
     root.protocol("WM_DELETE_WINDOW", app.on_close)
     root.mainloop()
 
