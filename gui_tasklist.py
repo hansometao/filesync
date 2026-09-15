@@ -91,7 +91,7 @@ class TaskCard(ttk.Frame):
         self._mode_lbl.pack(side=tk.LEFT, padx=(8, 0), pady=(2, 0))
 
         # 路径 + 调度信息合并为一行（用 · 分隔）
-        detail_row = tk.Frame(info, style="Card.TFrame")
+        detail_row = ttk.Frame(info, style="Card.TFrame")
         detail_row.pack(anchor=tk.W, fill=tk.X, pady=(2, 0))
 
         self._path_lbl = tk.Label(detail_row, font=("", 9), fg=C_TEXT_MUTED,
