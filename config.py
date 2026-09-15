@@ -15,7 +15,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 
 from utils.timeutil import unique_stamp
 

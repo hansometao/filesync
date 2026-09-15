@@ -190,8 +190,12 @@ def run_tests():
 
 
 def run_pyinstaller():
-    # type: () -> Optional[str]
-    """执行 PyInstaller 打包（onefile + windowed + 图标 + 版本资源）"""
+    # type: () -> str
+    """执行 PyInstaller 打包，返回产物路径。
+
+    失败路径（打包退出码非 0）直接 sys.exit，因此返回值不会是 None：
+    返回类型为 str，调用方 run_smoke_test 无需判空。
+    """
     _ensure_icon()
     print('[3/4] 执行 PyInstaller（spec=%s）…' % os.path.relpath(SPEC_FILE, ROOT))
     bak = _backup_old_artifact()

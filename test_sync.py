@@ -23,7 +23,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import Task, MODE_ONE_WAY, MODE_TWO_WAY, CONFLICT_NEWER, CONFLICT_SOURCE
+from config import Task, MODE_ONE_WAY, MODE_TWO_WAY, CONFLICT_NEWER, CONFLICT_SOURCE, SCHED_MONTHLY
 from sync_engine import perform_sync
 from scheduler import Scheduler
 from logger import init_logger
@@ -2729,7 +2729,115 @@ def test_39_from_dict_boundary():
     assert len(failures) == _fail_base, "test_39_from_dict_boundary: 本节有断言失败"
 
 
-TESTS = [test_1, test_2, test_3_run_now, test_2b_D_mtime, test_3b, test_3c_interval_last_run, test_4, test_5_save, test_6_M4, test_7_2s, test_8_M10_baseline, test_9_L4, test_10_CLI_run_cli, test_11_S1_SE1, test_12_include, test_13_interval_next_run, test_14_run_now, test_15_daily, test_16_logger, test_17, test_18_config_baseline, test_19_GUI, test_20_utils_paths, test_21_utils_timeutil, test_22_scanner, test_23_config_Task, test_24_logger_close, test_25_GUI_mock, test_26_run_now_next_run, test_27_fail_count, test_28_mkdir_type_conflict, test_29_F4_interval, test_30_F5_daily, test_31_F6_baseline, test_32_C1_C2, test_33_tray_autostart, test_34_fast_FAT32, test_35_vs_skip, test_36_refactor_regress, test_37_ui_review_fixes, test_38_app_split_structure, test_39_from_dict_boundary]
+# ---------- 40. monthly 调度: 计算 + 停机补跑链路 ----------
+def test_40_monthly():
+    # type: () -> None
+    """自测节 40. monthly 调度: next/prev_monthly_times + 补跑接线"""
+    global _dt40, best40, nxt40, ran40, sched40, td40, store40
+    _fail_base = len(failures)
+    print("[40] 调度: monthly 计算与触发")
+    from utils.timeutil import next_monthly_times, prev_monthly_time
+    import datetime as _dt40
+
+    # --- 纯函数：确定性断言 ---
+    # 2027-02 为 28 天（平年）、2028-02 为 29 天（闰年）
+    nxt40 = next_monthly_times([31], ["10:00"],
+                               _dt40.datetime(2026, 1, 15, 12, 0).timestamp())
+    check(nxt40 == _dt40.datetime(2026, 1, 31, 10, 0).timestamp(),
+          "monthly: 本月 31 日 10:00 未过 -> 返回当天 10:00")
+    nxt40 = next_monthly_times([31], ["10:00"],
+                               _dt40.datetime(2026, 1, 31, 11, 0).timestamp())
+    check(nxt40 == _dt40.datetime(2026, 3, 31, 10, 0).timestamp(),
+          "monthly: 1 月 31 日已过 -> 2 月无 31 日跳过, 取 3 月 31 日")
+    nxt40 = next_monthly_times([29, 31], ["08:00"],
+                               _dt40.datetime(2027, 2, 27, 9, 0).timestamp())
+    check(nxt40 == _dt40.datetime(2027, 3, 29, 8, 0).timestamp(),
+          "monthly: 平年 2 月无 29 日 -> 取 3 月 29 日(最小选中日)")
+    nxt40 = next_monthly_times([29], ["08:00"],
+                               _dt40.datetime(2028, 2, 1, 0, 0).timestamp())
+    check(nxt40 == _dt40.datetime(2028, 2, 29, 8, 0).timestamp(),
+          "monthly: 闰年 2 月 29 日合法(2 月 1 日 -> 当月 29 日)")
+    # 多日 × 多时刻取最近组合
+    best40 = next_monthly_times([5, 20], ["09:00", "18:00"],
+                                _dt40.datetime(2026, 8, 19, 10, 0).timestamp())
+    check(best40 == _dt40.datetime(2026, 8, 20, 9, 0).timestamp(),
+          "monthly: 多日多时刻取最近组合(20 日 09:00)")
+    # 非法输入容错
+    check(next_monthly_times([], ["10:00"], time.time()) is None, "monthly: 空月几 -> None")
+    check(next_monthly_times([3], [], time.time()) is None, "monthly: 空时刻 -> None")
+    check(next_monthly_times([0, 32], ["10:00"], time.time()) is None,
+          "monthly: 月几越界(0/32) -> None")
+    check(next_monthly_times([15], ["8点"], time.time()) is None,
+          "monthly: 时刻全非法 -> None")
+    # prev: 补跑判定用
+    prev40 = prev_monthly_time([10], ["08:00"],
+                               _dt40.datetime(2026, 8, 19, 12, 0).timestamp())
+    check(prev40 == _dt40.datetime(2026, 8, 10, 8, 0).timestamp(),
+          "monthly prev: 本月 10 日 08:00 已过 -> 返回该时刻")
+    prev40 = prev_monthly_time([25], ["08:00"],
+                               _dt40.datetime(2026, 8, 19, 12, 0).timestamp())
+    check(prev40 == _dt40.datetime(2026, 7, 25, 8, 0).timestamp(),
+          "monthly prev: 本月 25 日未到 -> 取上月 25 日")
+    check(prev_monthly_time([], ["08:00"], time.time()) is None,
+          "monthly prev: 空月几 -> None")
+
+    # --- 补跑链路：monthly 错过时刻 -> 启动补跑一次（与 30 节 daily 同构） ---
+    d = tempfile.mkdtemp()
+    src = os.path.join(d, "src")
+    dst = os.path.join(d, "dst")
+    os.makedirs(src)
+    os.makedirs(dst)
+    # 确定性构造"本月已过"的 monthly 时刻，避免月末/午夜边界 flaky：
+    # 用本月 1 日 00:01；仅当测试恰在本月 1 日 00:00–00:01 窄窗口内运行时
+    # 才退到上月 1 日 00:01（该组合必然已过且 > last_run-7200）
+    now40 = time.time()
+    st_now = time.localtime(now40)
+    cand40 = time.mktime((st_now.tm_year, st_now.tm_mon, 1, 0, 1, 0, 0, 0, -1))
+    if cand40 >= now40:  # 本月 1 日 00:01 尚未到（月初 1 分钟内） -> 用上月
+        y40, m40 = (st_now.tm_year - 1, 12) if st_now.tm_mon == 1 else (st_now.tm_year, st_now.tm_mon - 1)
+        cand40 = time.mktime((y40, m40, 1, 0, 1, 0, 0, 0, -1))
+    past_struct = time.localtime(cand40)
+    store40 = TaskStore(os.path.join(d, "tasks.json"))
+    td40 = fresh_task(MODE_ONE_WAY, src, dst)
+    td40.schedule.enabled = True
+    td40.schedule.type = SCHED_MONTHLY
+    td40.schedule.monthdays = [past_struct.tm_mday]
+    td40.schedule.times = [time.strftime("%H:%M", past_struct)]
+    td40.last_run = cand40 - 7200  # 停机错过：last_run 早于已过时刻 2 小时
+    store40.add(td40)
+    ran40 = []
+    sched40 = Scheduler(store40, lambda t: ran40.append(t.id))
+    sched40._poll_once()
+    deadline40 = time.time() + 5
+    while time.time() < deadline40 and td40.id not in ran40:
+        time.sleep(0.05)
+    check(td40.id in ran40, "monthly: 停机错过的时刻启动后补跑一次")
+    check(td40.next_run is None or td40.next_run > time.time(),
+          "monthly: 补跑后 next_run 指向未来(不连续重复触发)")
+    sched40.stop()
+
+    # 今天已跑过(last_run 晚于已过时刻) -> 不补跑
+    store40 = TaskStore(os.path.join(d, "tasks.json2"))
+    td40 = fresh_task(MODE_ONE_WAY, src, dst)
+    td40.schedule.enabled = True
+    td40.schedule.type = SCHED_MONTHLY
+    td40.schedule.monthdays = [past_struct.tm_mday]
+    td40.schedule.times = [time.strftime("%H:%M", past_struct)]
+    td40.last_run = time.time() - 30  # 刚运行过
+    store40.add(td40)
+    ran40 = []
+    sched40 = Scheduler(store40, lambda t: ran40.append(t.id))
+    sched40._poll_once()
+    deadline40 = time.time() + 2
+    while time.time() < deadline40 and td40.id in ran40:
+        time.sleep(0.05)
+    check(td40.id not in ran40 and td40.next_run is not None and td40.next_run > time.time(),
+          "monthly: 刚运行过不重复补跑, next_run 指向未来")
+    sched40.stop()
+    assert len(failures) == _fail_base, "test_40_monthly: 本节有断言失败"
+
+
+TESTS = [test_1, test_2, test_3_run_now, test_2b_D_mtime, test_3b, test_3c_interval_last_run, test_4, test_5_save, test_6_M4, test_7_2s, test_8_M10_baseline, test_9_L4, test_10_CLI_run_cli, test_11_S1_SE1, test_12_include, test_13_interval_next_run, test_14_run_now, test_15_daily, test_16_logger, test_17, test_18_config_baseline, test_19_GUI, test_20_utils_paths, test_21_utils_timeutil, test_22_scanner, test_23_config_Task, test_24_logger_close, test_25_GUI_mock, test_26_run_now_next_run, test_27_fail_count, test_28_mkdir_type_conflict, test_29_F4_interval, test_30_F5_daily, test_31_F6_baseline, test_32_C1_C2, test_33_tray_autostart, test_34_fast_FAT32, test_35_vs_skip, test_36_refactor_regress, test_37_ui_review_fixes, test_38_app_split_structure, test_39_from_dict_boundary, test_40_monthly]
 
 if __name__ == "__main__":
     import traceback

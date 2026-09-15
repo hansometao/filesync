@@ -226,7 +226,7 @@ class Scheduler(object):
 
     def _missed_since_last_run(self, task, now):
         # type: (Task, float) -> bool
-        """daily/weekly 计划在 last_run 之后是否有已错过未执行的时刻。
+        """daily/weekly/monthly 计划在 last_run 之后是否有已错过未执行的时刻。
 
         interval 不需要此判定：_compute_next 已按 last_run 锚定，
         过期即视为立即到期（补跑）。+2 秒容差吸收完成时刻与计划时刻的
@@ -240,6 +240,8 @@ class Scheduler(object):
             prev = prev_daily_time(sched.times, now)
         elif sched.type == SCHED_WEEKLY:
             prev = prev_weekly_time(sched.weekdays, sched.times, now)
+        elif sched.type == SCHED_MONTHLY:
+            prev = prev_monthly_time(sched.monthdays, sched.times, now)
         else:
             return False
         return prev is not None and prev > task.last_run + 2

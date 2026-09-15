@@ -110,7 +110,7 @@ def start_wakeup_listener(callback):
 def _win_acquire():
     # type: () -> bool
     global _wake_event
-    kernel32 = ctypes.windll.kernel32
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]  # Windows 专属，mypy 无存根
     kernel32.CreateMutexW.restype = wintypes.HANDLE
     kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL,
                                       wintypes.LPCWSTR]
@@ -144,7 +144,7 @@ def _win_acquire():
 
 def _win_wait_loop(callback):
     # type: (Callable[[], None]) -> None
-    kernel32 = ctypes.windll.kernel32
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]  # Windows 专属，mypy 无存根
     kernel32.WaitForSingleObject.restype = wintypes.DWORD
     kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
     kernel32.ResetEvent.restype = wintypes.BOOL

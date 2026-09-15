@@ -13,7 +13,7 @@ import sys
 
 import tkinter as tk
 from tkinter import ttk
-from typing import Optional
+from typing import Any, Optional
 
 from config import MODE_ONE_WAY, MODE_TWO_WAY, Task
 from scheduler import Scheduler
@@ -61,7 +61,7 @@ class TaskCard(ttk.Frame):
     """
 
     def __init__(self, master, app, task_id):
-        # type: (tk.Widget, object, str) -> None
+        # type: (tk.Widget, Any, str) -> None
         super().__init__(master, style="Card.TFrame", padding=(14, 10))
         self._app = app
         self._id = task_id
