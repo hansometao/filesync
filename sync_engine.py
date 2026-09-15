@@ -645,6 +645,60 @@ def _dst_dirty_rels(actions, src_root, dst_root):
     return dirty
 
 
+def _hash_rels_parallel(root, rels, sizes=None, cancel_event=None, workers=8,
+                        min_batch=32, min_avg_bytes=256 * 1024):
+    # type: (str, List[str], Optional[List[int]], Optional[Any], int, int, int) -> Dict[str, Optional[str]]
+    """批量计算文件哈希：大文件批量用线程池并行，小文件/少量串行。
+
+    并行仅对**大文件**有效（读取与 hashlib/xxhash 分块更新均释放 GIL，
+    多线程可重叠 I/O 与哈希计算）；小文件哈希是 per-file 开销主导
+    （open/read/close ~1ms/个），线程调度与 GIL 竞争反成负担——实测
+    1 万个 4KB 文件并行 20.4s vs 串行 13.2s（退化 55%）。故按**平均
+    文件尺寸**门控（单文件工作量是否够大决定并行是否划算，总量门控
+    会被"文件多而小"绕过——40MB 总量的 4KB 文件并行同样退化）：
+    平均 >= min_avg_bytes（默认 256KB）才并行，否则串行。失败条目值
+    为 None，与 hash_file 单文件语义一致（baseline 无哈希时下次按
+    modified 保守重试，不影响正确性）。cancel_event 置位时抛
+    ScanCancelled（与串行路径一致）。
+    """
+    out = {}  # type: Dict[str, Optional[str]]
+    if not rels:
+        return out
+
+    def _one(rel):
+        # type: (str) -> Optional[str]
+        return hash_file(join_rel(root, rel), cancel_event=cancel_event)
+
+    if sizes is not None and len(sizes) != len(rels):
+        sizes = None  # 防御：长度不一致时退化为仅按条数门控
+    avg_bytes = (sum(sizes) / len(sizes)) if sizes else None
+    use_pool = (len(rels) >= min_batch
+                and (avg_bytes is None or avg_bytes >= min_avg_bytes))
+    if not use_pool:
+        for rel in rels:
+            out[rel] = _one(rel)
+        return out
+    from concurrent.futures import ThreadPoolExecutor
+    cancelled = False
+    pool = ThreadPoolExecutor(max_workers=workers,
+                              thread_name_prefix="fshash")
+    try:
+        futs = [(rel, pool.submit(_one, rel)) for rel in rels]
+        for rel, fut in futs:
+            try:
+                out[rel] = fut.result()
+            except ScanCancelled:
+                cancelled = True
+            except Exception:
+                # 单文件哈希意外异常（hash_file 已兜 OSError，此处防御）
+                out[rel] = None
+    finally:
+        pool.shutdown(wait=True)
+    if cancelled:
+        raise ScanCancelled()
+    return out
+
+
 def build_baseline_after(task, dst_root, self_paths=None, snap=None,
                          old_baseline=None, dirty_rels=None, cancel_event=None,
                          exclude_rels=None):
@@ -690,17 +744,38 @@ def build_baseline_after(task, dst_root, self_paths=None, snap=None,
                 fresh[rel] = m
     old_baseline = old_baseline or {}
     base = {}  # type: Dict[str, Dict[str, Any]]
+    # 先分类：可直接沿用旧哈希的条目 vs 需要现算哈希的条目
+    reuse = []  # type: List[Tuple[str, Dict[str, Any], FileMeta]]
+    need_hash = []  # type: List[Tuple[str, FileMeta]]
     for rel, meta in fresh.items():
         if meta.is_dir:
             continue
         old = old_baseline.get(rel)
         if (old is not None and old.get("size") == meta.size
                 and old.get("mtime") == meta.mtime and old.get("hash") is not None):
-            base[rel] = {"size": meta.size, "mtime": meta.mtime, "hash": old["hash"]}
-            continue
-        h = meta.hash
-        if h is None:
-            h = hash_file(join_rel(dst_root, rel), cancel_event=cancel_event)
+            reuse.append((rel, old, meta))
+        else:
+            need_hash.append((rel, meta))
+    # 需现算的批量并行哈希（少量走串行，见 _hash_rels_parallel）；
+    # 缓存哈希（快照/diff 阶段已算过）直接复用不重算
+    cached = {}  # type: Dict[str, Optional[str]]
+    to_compute = []  # type: List[str]
+    to_compute_sizes = []  # type: List[int]
+    for rel, meta in need_hash:
+        if meta.hash is not None:
+            cached[rel] = meta.hash
+        else:
+            to_compute.append(rel)
+            to_compute_sizes.append(meta.size)
+    computed = _hash_rels_parallel(dst_root, to_compute,
+                                   sizes=to_compute_sizes,
+                                   cancel_event=cancel_event)
+    for rel, old, meta in reuse:
+        base[rel] = {"size": meta.size, "mtime": meta.mtime, "hash": old["hash"]}
+    for rel, meta in need_hash:
+        h = cached.get(rel)
+        if h is None and rel in computed:
+            h = computed[rel]
         entry = {"size": meta.size, "mtime": meta.mtime}  # type: Dict[str, Any]
         if h is not None:
             entry["hash"] = h
