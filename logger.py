@@ -96,12 +96,10 @@ class AppLogger(object):
                     # queue.put_nowait 非阻塞调用，正常 <1ms。若回调意外阻塞
                     # （如外部注入了慢回调），此处告警帮助定位"日志写入卡顿"的
                     # 根因。不中断后续回调——告警后继续执行剩余回调。
-                    try:
-                        self._write_line(
-                            "[WARN] 日志回调执行耗时 %.2fs（回调: %s）"
-                            % (elapsed, getattr(cb, "__name__", repr(cb))))
-                    except Exception:
-                        pass
+                    # 告警经 _emit 走加锁路径：_write_line 契约是"调用方须持锁"，
+                    # 锁外直调会与并发线程的写入/轮转交错
+                    self.warn("日志回调执行耗时 %.2fs（回调: %s）"
+                              % (elapsed, getattr(cb, "__name__", repr(cb))))
             except Exception:
                 pass
         # 控制台（GUI 模式 quiet 时跳过，避免终端噪声）；编码已在 __init__ 配置
