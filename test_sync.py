@@ -2450,6 +2450,8 @@ class _FakeWidget(object):
         pass
     def grid(self, *a, **k):
         pass
+    def grid_remove(self, *a, **k):
+        pass
     def pack(self, *a, **k):
         pass
     def bind(self, *a, **k):

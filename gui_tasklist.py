@@ -37,6 +37,12 @@ C_TEXT_DISABLED = "#BDBDBD"   # 禁用态文字
 C_BORDER = "#E0E0E0"          # 分隔线
 C_SWITCH_OFF = "#BDBDBD"      # 开关关闭
 C_SWITCH_ON = "#26A69A"       # 开关打开
+C_WHITE = "#FFFFFF"           # 白（品牌栏文字 / 输入框底）
+C_BRAND_SUB = "#E0F2F1"       # 品牌栏副标题文字（同 C_BRAND_LIGHT）
+C_LOG_ERROR = "#C62828"       # 日志 ERROR 级别（深红，比 C_DELETE 更醒目）
+C_LOG_WARN = "#E65100"        # 日志 WARN 级别（深橙）
+C_DELETE_HOVER = "#FFEBEE"    # 危险按钮 hover 底色
+C_SWITCH_KNOB = "#D0D0D0"     # 开关滑块描边
 
 # ---------- 工具：截断中间路径（保留首尾） ----------
 def _short_path(p, max_len=36):
@@ -236,17 +242,17 @@ class TaskCard(ttk.Frame):
         # 状态标记
         # P0-4 修复：从未运行（无 last_run）显示"未运行"，不再误报"✓成功"
         if running:
-            self._status_lbl.config(text="●运行中", fg=C_BRAND)
+            self._status_lbl.config(text="● 运行中", fg=C_BRAND)
         elif not task.enabled:
-            self._status_lbl.config(text="○已禁用", fg=C_TEXT_DISABLED)
+            self._status_lbl.config(text="● 已禁用", fg=C_TEXT_DISABLED)
         elif not task.last_run:
-            self._status_lbl.config(text="─未运行", fg=C_TEXT_DISABLED)
+            self._status_lbl.config(text="● 未运行", fg=C_TEXT_DISABLED)
         elif task.last_status in ("成功", None):
-            self._status_lbl.config(text="✓成功", fg=C_OK)
+            self._status_lbl.config(text="● 成功", fg=C_OK)
         elif task.last_status in ("部分失败", "已取消"):
-            self._status_lbl.config(text="⚠%s" % task.last_status, fg=C_WARN)
+            self._status_lbl.config(text="● %s" % task.last_status, fg=C_WARN)
         else:
-            self._status_lbl.config(text="✗%s" % (task.last_status or "失败"),
+            self._status_lbl.config(text="● %s" % (task.last_status or "失败"),
                                     fg=C_DELETE)
 
         # P1: 运行中禁用"运行"按钮（视觉反馈，避免点击后只弹提示）
@@ -288,7 +294,7 @@ class TaskCard(ttk.Frame):
             cx = track_x1 + r + 1
         cy = ch // 2
         c.create_oval(cx - r, cy - r, cx + r, cy + r,
-                      fill="#FFFFFF", outline="#D0D0D0")
+                      fill=C_WHITE, outline=C_SWITCH_KNOB)
 
     def set_selected(self, sel):
         # type: (bool) -> None

@@ -47,6 +47,7 @@ from gui_tasklist import (  # noqa: F401  (配色常量被本模块 UI 构建引
     C_BG, C_CARD_BG, C_CARD_BG_ALT,
     C_TEXT, C_TEXT_MUTED, C_TEXT_DISABLED,
     C_BORDER, C_SWITCH_OFF, C_SWITCH_ON,
+    C_WHITE, C_BRAND_SUB, C_LOG_ERROR, C_LOG_WARN, C_DELETE_HOVER,
 )
 
 APP_DIR = app_dir()
@@ -173,20 +174,25 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin):
         brand_left = tk.Frame(brand, bg=C_BRAND)
         brand_left.pack(side=tk.LEFT, padx=16)
         tk.Label(brand_left, text="📁", font=("", 18), bg=C_BRAND,
-                 fg="#FFFFFF").pack(side=tk.LEFT)
+                 fg=C_WHITE).pack(side=tk.LEFT)
         tk.Label(brand_left, text="filesync", font=("", 14, "bold"),
-                 bg=C_BRAND, fg="#FFFFFF").pack(side=tk.LEFT, padx=(6, 4))
+                 bg=C_BRAND, fg=C_WHITE).pack(side=tk.LEFT, padx=(6, 4))
         tk.Label(brand_left, text="定时文件同步工具", font=("", 10),
-                 bg=C_BRAND, fg="#E0F2F1").pack(side=tk.LEFT)
+                 bg=C_BRAND, fg=C_BRAND_SUB).pack(side=tk.LEFT)
 
-        # 右：全局按钮（设置）
+        # 右：全局入口（设置）——Label 手绘扁平按钮，与品牌栏底色无缝
         brand_right = tk.Frame(brand, bg=C_BRAND)
         brand_right.pack(side=tk.RIGHT, padx=12)
 
-        settings_btn = ttk.Button(
-            brand_right, text="⚙ 设置", style="Brand.TButton",
-            command=self._on_settings)
-        settings_btn.pack(side=tk.LEFT)
+        settings_lbl = tk.Label(brand_right, text="⚙ 设置", font=("", 9),
+                                bg=C_BRAND, fg=C_WHITE, padx=10, pady=5,
+                                cursor="hand2")
+        settings_lbl.pack(side=tk.LEFT)
+        settings_lbl.bind("<Button-1>", lambda e: self._on_settings())
+        settings_lbl.bind("<Enter>",
+                          lambda e: settings_lbl.config(bg=C_BRAND_DARK))
+        settings_lbl.bind("<Leave>",
+                          lambda e: settings_lbl.config(bg=C_BRAND))
 
         # ---- 2. 工具栏 ----
         toolbar = tk.Frame(self.root, bg=C_BG)
@@ -208,12 +214,12 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin):
         _search_frame = tk.Frame(toolbar, bg=C_BG)
         _search_frame.pack(side=tk.LEFT, padx=(12, 0))
         _search_icon = tk.Label(_search_frame, text="🔍", font=("", 9),
-                                bg="#FFFFFF", fg=C_TEXT_MUTED, padx=4)
+                                bg=C_CARD_BG, fg=C_TEXT_MUTED, padx=4)
         _search_icon.pack(side=tk.LEFT)
         self._search_entry = tk.Entry(
             _search_frame, textvariable=self._search_var,
             font=("", 9), width=16, relief=tk.SOLID, bd=1,
-            bg="#FFFFFF", fg=C_TEXT, insertbackground=C_TEXT)
+            bg=C_CARD_BG, fg=C_TEXT, insertbackground=C_TEXT)
         self._search_entry.pack(side=tk.LEFT)
         self._search_entry.insert(0, "")
         # 占位提示
@@ -316,14 +322,14 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin):
 
         self.log_text = scrolledtext.ScrolledText(
             log_outer, height=5, state=tk.DISABLED,
-            font=("Consolas", 9), bg="#FFFFFF", fg=C_TEXT,
+            font=("Consolas", 9), bg=C_CARD_BG, fg=C_TEXT,
             relief=tk.SOLID, bd=1, highlightthickness=0,
             borderwidth=1)
         self.log_text.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
 
         # P1: 日志按级别着色（ERROR 红 / WARN 橙），提升扫读性
-        self.log_text.tag_configure("error", foreground="#C62828")
-        self.log_text.tag_configure("warn", foreground="#E65100")
+        self.log_text.tag_configure("error", foreground=C_LOG_ERROR)
+        self.log_text.tag_configure("warn", foreground=C_LOG_WARN)
 
         # P1: ↑↓ 方向键在卡片间移动选中（无鼠标操作可达）
         self.root.bind("<Up>", lambda e: self._on_arrow(-1))
@@ -380,16 +386,16 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin):
 
         # Accent：主色实心按钮（添加任务 / 运行 / 确认执行）
         style.configure("Accent.TButton", font=("", 9, "bold"),
-                        background=C_BRAND, foreground="#FFFFFF",
+                        background=C_BRAND, foreground=C_WHITE,
                         padding=(12, 5))
         style.map("Accent.TButton",
                   background=[("active", C_BRAND_DARK),
                               ("disabled", C_TEXT_DISABLED)],
-                  foreground=[("disabled", "#FFFFFF")])
+                  foreground=[("disabled", C_WHITE)])
 
         # Outline：白底描边按钮（编辑 / 运行全部 / 调度开关）
         style.configure("Outline.TButton", font=("", 9),
-                        background="#FFFFFF", foreground=C_TEXT,
+                        background=C_CARD_BG, foreground=C_TEXT,
                         relief=tk.SOLID, borderwidth=1, padding=(12, 5))
         style.map("Outline.TButton",
                   background=[("active", C_CARD_BG_ALT),
@@ -398,15 +404,15 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin):
 
         # Danger：删除按钮（红字白底）
         style.configure("Danger.TButton", font=("", 9),
-                        background="#FFFFFF", foreground=C_DELETE,
+                        background=C_CARD_BG, foreground=C_DELETE,
                         relief=tk.SOLID, borderwidth=1, padding=(12, 5))
         style.map("Danger.TButton",
-                  background=[("active", "#FFEBEE")],
+                  background=[("active", C_DELETE_HOVER)],
                   foreground=[("disabled", C_TEXT_DISABLED)])
 
         # BrandBtn：品牌栏内白字透明底（设置）
         style.configure("Brand.TButton", font=("", 9),
-                        background=C_BRAND, foreground="#FFFFFF",
+                        background=C_BRAND, foreground=C_WHITE,
                         relief=tk.FLAT, borderwidth=0, padding=(10, 6))
         style.map("Brand.TButton",
                   background=[("active", C_BRAND_DARK)])
@@ -418,9 +424,9 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin):
         style.configure("Title.TLabel", font=("", 11, "bold"), foreground=C_TEXT)
         style.configure("Error.TLabel", font=("", 9), foreground=C_DELETE)
         style.configure("Brand.TLabel", font=("", 14, "bold"),
-                        foreground="#FFFFFF", background=C_BRAND)
+                        foreground=C_WHITE, background=C_BRAND)
         style.configure("BrandSub.TLabel", font=("", 10),
-                        foreground="#E0F2F1", background=C_BRAND)
+                        foreground=C_BRAND_SUB, background=C_BRAND)
 
         # ---------- TLabelframe（对话框分组） ----------
         style.configure("TLabelframe", font=("", 9))
@@ -437,7 +443,7 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin):
 
         # ---------- Treeview（DiffDialog 差异列表） ----------
         style.configure("Treeview", font=("", 9), rowheight=24,
-                        background="#FFFFFF", fieldbackground="#FFFFFF")
+                        background=C_CARD_BG, fieldbackground=C_CARD_BG)
         style.configure("Treeview.Heading", font=("", 9, "bold"))
         style.map("Treeview",
                   background=[("selected", C_BRAND_LIGHT)],
@@ -872,33 +878,41 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin):
         self._refresh_tasks(full=False)
         self._popup_if_alive("info", "批量运行", msg)
 
-    def _on_new_group(self):
-        # type: () -> None
-        """分组功能预留入口（现有 Task 无 group 字段，后续扩展）。"""
-        messagebox.showinfo("提示", "分组功能即将推出，敬请期待")
-
     def _on_settings(self):
         # type: () -> None
-        """设置入口：打开日志目录 + 打开配置目录。"""
-        choice = messagebox.askyesnocancel(
-            "设置",
-            "打开日志目录？\n\n"
-            "点 [是] 打开日志目录，[否] 打开配置目录，[取消] 返回。")
-        if choice is True:
-            self._open_logs()
-        elif choice is False:
-            cfg_dir = os.path.dirname(CONFIG_PATH)
-            if sys.platform == "win32":
-                try:
-                    os.startfile(cfg_dir)  # type: ignore
-                except Exception:
-                    messagebox.showinfo("配置目录", cfg_dir)
-            else:
-                try:
-                    import subprocess
-                    subprocess.Popen(["xdg-open", cfg_dir])
-                except Exception:
-                    messagebox.showinfo("配置目录", cfg_dir)
+        """设置入口：对话框内提供打开日志目录 / 配置目录两个显式动作。"""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("设置")
+        dlg.transient(self.root)
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        body = ttk.Frame(dlg, padding=16)
+        body.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(body, text="数据与日志", style="Title.TLabel").pack(anchor=tk.W)
+        ttk.Label(body, text="任务配置与运行日志分别存放在以下目录，可点击打开：",
+                  style="Muted.TLabel").pack(anchor=tk.W, pady=(2, 10))
+        ttk.Button(body, text="打开日志目录", style="Outline.TButton",
+                   command=self._open_logs).pack(fill=tk.X, pady=3)
+        ttk.Button(body, text="打开配置目录", style="Outline.TButton",
+                   command=self._open_config_dir).pack(fill=tk.X, pady=3)
+        ttk.Button(body, text="关闭", style="Accent.TButton",
+                   command=dlg.destroy).pack(fill=tk.X, pady=(10, 0))
+        dlg.protocol("WM_DELETE_WINDOW", dlg.destroy)
+
+    def _open_config_dir(self):
+        # type: () -> None
+        cfg_dir = os.path.dirname(CONFIG_PATH)
+        if sys.platform == "win32":
+            try:
+                os.startfile(cfg_dir)  # type: ignore
+            except Exception:
+                messagebox.showinfo("配置目录", cfg_dir)
+        else:
+            try:
+                import subprocess
+                subprocess.Popen(["xdg-open", cfg_dir])
+            except Exception:
+                messagebox.showinfo("配置目录", cfg_dir)
 
     # ==================================================================
     #  日志面板（与 Treeview 版相同，self.log_text 接口不变）

@@ -136,11 +136,13 @@ class TaskDialog(tk.Toplevel):
             self._load(task)
 
     def _row(self, parent, row, label, widget, btn=None):
-        # type: (tk.Misc, int, str, tk.Widget, Optional[tk.Widget]) -> None
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky=tk.W, padx=4, pady=3)
+        # type: (tk.Misc, int, str, tk.Widget, Optional[tk.Widget]) -> tk.Widget
+        lbl = ttk.Label(parent, text=label)
+        lbl.grid(row=row, column=0, sticky=tk.W, padx=4, pady=3)
         widget.grid(row=row, column=1, sticky=tk.EW, padx=4, pady=3)
         if btn is not None:
             btn.grid(row=row, column=2, padx=4, pady=3)
+        return lbl
 
     def _build(self):
         # type: () -> None
@@ -203,12 +205,34 @@ class TaskDialog(tk.Toplevel):
         r = 0
         self._row(sched, r, "启用定时", ttk.Checkbutton(sched, text="启用", variable=self._sched_on)); r += 1
         self._row(sched, r, "定时类型", self._sched_type); r += 1
-        self._row(sched, r, "间隔(分钟)", self._interval); r += 1
-        self._row(sched, r, "每日时刻", self._times); r += 1
-        self._row(sched, r, "每周(1-7)", self._weekdays); r += 1
-        self._row(sched, r, "每月日期", self._monthdays); r += 1
-        ttk.Label(sched, text="提示：间隔仅用于「间隔定时」；每日时刻如 08:00,20:00；每周如 1,3,5；每月如 1,15").grid(
-            row=r, column=0, columnspan=3, sticky=tk.W, padx=4, pady=(4, 0))
+        # 参数行 + 各字段提示行：按定时类型联动显隐（只显示当前类型的输入行）
+        self._interval_row = self._row(sched, r, "间隔(分钟)", self._interval); r += 1
+        self._times_row = self._row(sched, r, "每日时刻", self._times); r += 1
+        self._weekdays_row = self._row(sched, r, "每周(1-7)", self._weekdays); r += 1
+        self._monthdays_row = self._row(sched, r, "每月日期", self._monthdays); r += 1
+        self._sched_hint = ttk.Label(sched, style="Muted.TLabel")
+        self._sched_hint.grid(row=r, column=0, columnspan=3, sticky=tk.W, padx=4, pady=(4, 0))
+
+        def _on_sched_type(*_):
+            # type: (*object) -> None
+            stype = _SCHED_REV.get(self._sched_type.get(), self._sched_type.get())
+            rows = {
+                SCHED_INTERVAL: (self._interval_row, self._interval, "填写间隔分钟数，如 60"),
+                SCHED_DAILY: (self._times_row, self._times, "每日时刻用逗号分隔，如 08:00,20:00"),
+                SCHED_WEEKLY: (self._weekdays_row, self._weekdays, "每周几用 1-7 逗号分隔，1=周一"),
+                SCHED_MONTHLY: (self._monthdays_row, self._monthdays, "每月几号用逗号分隔，如 1,15"),
+            }
+            for key, (lbl, _w, hint) in rows.items():
+                if key == stype:
+                    lbl.grid()
+                    _w.grid()
+                    self._sched_hint.configure(text="提示：" + hint)
+                else:
+                    lbl.grid_remove()
+                    _w.grid_remove()
+        self._sched_type.bind("<<ComboboxSelected>>", _on_sched_type)
+        self._on_sched_type = _on_sched_type
+        _on_sched_type()
 
         # ---- Tab 4: 过滤规则 ----
         filt = ttk.Frame(nb, padding=8)
@@ -220,7 +244,7 @@ class TaskDialog(tk.Toplevel):
         r = 0
         self._row(filt, r, "包含规则", self._include); r += 1
         self._row(filt, r, "排除规则", self._exclude); r += 1
-        ttk.Label(filt, text="提示：包含/排除用逗号分隔，如 *.tmp,__pycache__/；每日时刻如 08:00,20:00").grid(
+        ttk.Label(filt, text="提示：包含/排除规则用逗号分隔，如 *.tmp,__pycache__/").grid(
             row=r, column=0, columnspan=3, sticky=tk.W, padx=4, pady=(4, 0))
 
         # ---- 按钮 ----

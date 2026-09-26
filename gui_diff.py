@@ -7,7 +7,7 @@
 
 import tkinter as tk
 from tkinter import ttk
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from config import (
     CONFLICT_NEWER, CONFLICT_ASK, CONFLICT_POLICIES, Task, POLICY_LABELS,
@@ -83,29 +83,52 @@ class DiffDialog(tk.Toplevel):
         # 差异列表可能上千条：Treeview + 垂直滚动条，保证可滚动查看全部
         tree_frame = ttk.Frame(frm)
         tree_frame.pack(fill=tk.BOTH, expand=True, side=tk.TOP)
+
+        # 动作类型筛选（动作多时快速定位冲突/删除等关键项）
+        filter_row = ttk.Frame(tree_frame)
+        filter_row.pack(fill=tk.X, side=tk.TOP)
+        ttk.Label(filter_row, text="筛选：", style="Muted.TLabel").pack(side=tk.LEFT)
+        _FILTER_DEFS = (
+            ("conflict", "冲突"),
+            ("delete", "删除"),
+            ("copy", "复制"),
+            ("mkdir", "目录"),
+            ("extra", "仅目标"),
+        )
+        self._filter_vars = {}  # type: Dict[str, tk.BooleanVar]
+        for _fkey, _ftext in _FILTER_DEFS:
+            _fvar = tk.BooleanVar(value=False)
+            self._filter_vars[_fkey] = _fvar
+            ttk.Checkbutton(
+                filter_row, text=_ftext, variable=_fvar,
+                command=self._apply_filter).pack(side=tk.LEFT, padx=(0, 8))
+        self._filter_count_lbl = ttk.Label(filter_row, style="Muted.TLabel")
+        self._filter_count_lbl.pack(side=tk.RIGHT)
+
         tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=18)
         sb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=sb.set)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
         tree.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
-        tree.heading("tag", text="")
+        tree.heading("tag", text="动作")
         tree.heading("kind", text="类型")
         tree.heading("rel", text="相对路径")
         tree.heading("detail", text="说明")
-        tree.column("tag", width=6, anchor=tk.CENTER)
-        tree.column("kind", width=80)
+        tree.column("tag", width=48, anchor=tk.CENTER)
+        tree.column("kind", width=90)
         tree.column("rel", width=320)
-        tree.column("detail", width=240)
+        tree.column("detail", width=220)
 
         MAX_SHOW = 2000
+        self._shown_actions = []  # type: List[Any]
         shown = 0
         for act in self.diff.actions:
             if shown >= MAX_SHOW:
                 break
-            tag = _KIND_TAG.get(act.kind, "")
-            kind = _KIND_LABEL.get(act.kind, act.kind)
-            tree.insert("", tk.END, values=(tag, kind, act.rel, act.detail))
+            self._shown_actions.append(act)
             shown += 1
+        self._tree = tree
+        self._insert_actions(self._shown_actions)
         if len(self.diff.actions) > MAX_SHOW:
             ttk.Label(frm, text="（共 %d 条动作，仅显示前 %d 条；完整清单见日志）"
                       % (len(self.diff.actions), MAX_SHOW),
@@ -140,6 +163,37 @@ class DiffDialog(tk.Toplevel):
                    command=self._on_cancel).pack(side=tk.RIGHT, padx=4)
         ttk.Button(btn, text="确认执行", style="Accent.TButton",
                    command=self._on_confirm).pack(side=tk.RIGHT, padx=4)
+
+    def _insert_actions(self, actions):
+        # type: (List[Any]) -> None
+        tree = self._tree
+        for act in actions:
+            tag = _KIND_TAG.get(act.kind, "")
+            kind = _KIND_LABEL.get(act.kind, act.kind)
+            tree.insert("", tk.END, values=(tag, kind, act.rel, act.detail))
+
+    def _apply_filter(self):
+        # type: () -> None
+        """按勾选的动作类别过滤显示；全不勾选时显示全部。"""
+        groups = {
+            "conflict": ("type_conflict", "conflict", "conflict_del"),
+            "delete": ("delete", "rmdir"),
+            "copy": ("copy",),
+            "mkdir": ("mkdir",),
+            "extra": ("extra",),
+        }
+        selected = {k for k, v in self._filter_vars.items() if v.get()}
+        if not selected:
+            visible = self._shown_actions
+        else:
+            kinds = set()  # type: set
+            for k in selected:
+                kinds.update(groups[k])
+            visible = [a for a in self._shown_actions if a.kind in kinds]
+        self._tree.delete(*self._tree.get_children())
+        self._insert_actions(visible)
+        self._filter_count_lbl.configure(
+            text="%d / %d 项" % (len(visible), len(self._shown_actions)))
 
     def _on_confirm(self):
         # type: () -> None
