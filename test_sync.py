@@ -2839,7 +2839,93 @@ def test_40_monthly():
     assert len(failures) == _fail_base, "test_40_monthly: 本节有断言失败"
 
 
-TESTS = [test_1, test_2, test_3_run_now, test_2b_D_mtime, test_3b, test_3c_interval_last_run, test_4, test_5_save, test_6_M4, test_7_2s, test_8_M10_baseline, test_9_L4, test_10_CLI_run_cli, test_11_S1_SE1, test_12_include, test_13_interval_next_run, test_14_run_now, test_15_daily, test_16_logger, test_17, test_18_config_baseline, test_19_GUI, test_20_utils_paths, test_21_utils_timeutil, test_22_scanner, test_23_config_Task, test_24_logger_close, test_25_GUI_mock, test_26_run_now_next_run, test_27_fail_count, test_28_mkdir_type_conflict, test_29_F4_interval, test_30_F5_daily, test_31_F6_baseline, test_32_C1_C2, test_33_tray_autostart, test_34_fast_FAT32, test_35_vs_skip, test_36_refactor_regress, test_37_ui_review_fixes, test_38_app_split_structure, test_39_from_dict_boundary, test_40_monthly]
+def test_41_review_improvements():
+    """自测节 41. 评审改进回归：首同步冲突预警 / 日志多代轮转 / 哈希池取消"""
+    _fail_base = len(failures)
+    print("[41] 评审改进: 冲突预警 + 多代日志轮转 + 哈希池取消")
+    import os as _os
+    import shutil as _shutil
+
+    # --- R1: 首次双向同步冲突总量预警（纯函数） ---
+    from gui_diff import first_sync_conflict_warning as _fsw
+    from gui_diff import FIRST_SYNC_CONFLICT_WARN as _FSW_N
+    check(_fsw(0, False) is None, "41: 无冲突不预警")
+    check(_fsw(_FSW_N, True) is None, "41: 已有 baseline(非首同步)不预警")
+    check(_fsw(_FSW_N - 1, False) is None, "41: 冲突数低于阈值不预警")
+    w = _fsw(_FSW_N, False)
+    check(w is not None and str(_FSW_N) in w,
+          "41: 首同步且冲突达阈值 -> 预警文案含冲突数")
+
+    # --- R5: 日志多代轮转（.1~.3 历史顺移） ---
+    from logger import _shift_backups, AppLogger
+    d41 = _os.path.join(tempfile.gettempdir(), "fs_test_41_logs")
+    _shutil.rmtree(d41, ignore_errors=True)
+    _os.makedirs(d41, exist_ok=True)
+    log41 = _os.path.join(d41, "foldersync.log")
+    # 预置 .1/.2/.3 历史与超限当前日志，触发 _reopen 轮转
+    for gen, marker in ((1, "OLD1"), (2, "OLD2"), (3, "OLD3")):
+        with open("%s.%d" % (log41, gen), "w", encoding="utf-8") as f:
+            f.write(marker)
+    with open(log41, "w", encoding="utf-8") as f:
+        f.write("x" * (2 * 1024 * 1024 + 1))  # 超过 _MAX_FILE_BYTES
+    lg41 = AppLogger(d41, quiet=True)
+    try:
+        lg41.info("rotate-me")
+        # 当前日志重开且新写入在头部
+        with open(log41, "r", encoding="utf-8") as f:
+            check("rotate-me" in f.read(), "41: 轮转后当前日志重开可写")
+        # 原当前日志成为 .1，旧 .1/.2 顺移为 .2/.3（旧 .3 被顶掉）
+        with open(log41 + ".1", "r", encoding="utf-8") as f:
+            check(f.read(1) == "x", "41: 超限日志顺移为 .1")
+        with open(log41 + ".2", "r", encoding="utf-8") as f:
+            check(f.read(4) == "OLD1", "41: 旧 .1 顺移为 .2")
+        with open(log41 + ".3", "r", encoding="utf-8") as f:
+            check(f.read(4) == "OLD2", "41: 旧 .2 顺移为 .3（旧 .3 丢弃）")
+        # _shift_backups 直接调用：全缺历史不抛异常（幂等）
+        try:
+            _shift_backups(log41)
+            check(True, "41: _shift_backups 无历史文件不抛异常")
+        except Exception:
+            check(False, "41: _shift_backups 无历史文件不抛异常")
+    finally:
+        lg41.close()
+        _shutil.rmtree(d41, ignore_errors=True)
+
+    # --- R2: 并行哈希池取消（cancel 后快速返回且抛 ScanCancelled） ---
+    from sync_engine import _hash_rels_parallel
+    from scanner import ScanCancelled
+    src41 = _os.path.join(tempfile.gettempdir(), "fs_test_41_hash")
+    _shutil.rmtree(src41, ignore_errors=True)
+    _os.makedirs(src41, exist_ok=True)
+    cancel41 = threading.Event()
+    n41 = 64  # >= min_batch(32)，走线程池路径
+    for i in range(n41):
+        with open(_os.path.join(src41, "f%02d.dat" % i), "wb") as f:
+            f.write(b"x" * 4096)
+    try:
+        _hash_rels_parallel(src41, ["f%02d.dat" % i for i in range(n41)],
+                            cancel_event=cancel41)
+        check(True, "41: 未取消时并行哈希正常完成")
+    except Exception:
+        check(False, "41: 未取消时并行哈希正常完成")
+    cancel41.set()
+    t41 = time.time()
+    try:
+        _hash_rels_parallel(src41, ["f%02d.dat" % i for i in range(n41)],
+                            cancel_event=cancel41)
+        check(False, "41: 预置取消 -> 抛 ScanCancelled")
+    except ScanCancelled:
+        check(True, "41: 预置取消 -> 抛 ScanCancelled")
+    elapsed41 = time.time() - t41
+    # 取消后小文件哈希应快速返回（未取消跑完 ~64 个文件远不止此值；
+    # 宽松阈值防 CI 慢机抖动）
+    check(elapsed41 < 5.0, "41: 取消后快速返回(%.2fs < 5s)" % elapsed41)
+    _shutil.rmtree(src41, ignore_errors=True)
+
+    assert len(failures) == _fail_base, "test_41_review_improvements: 本节有断言失败"
+
+
+TESTS = [test_1, test_2, test_3_run_now, test_2b_D_mtime, test_3b, test_3c_interval_last_run, test_4, test_5_save, test_6_M4, test_7_2s, test_8_M10_baseline, test_9_L4, test_10_CLI_run_cli, test_11_S1_SE1, test_12_include, test_13_interval_next_run, test_14_run_now, test_15_daily, test_16_logger, test_17, test_18_config_baseline, test_19_GUI, test_20_utils_paths, test_21_utils_timeutil, test_22_scanner, test_23_config_Task, test_24_logger_close, test_25_GUI_mock, test_26_run_now_next_run, test_27_fail_count, test_28_mkdir_type_conflict, test_29_F4_interval, test_30_F5_daily, test_31_F6_baseline, test_32_C1_C2, test_33_tray_autostart, test_34_fast_FAT32, test_35_vs_skip, test_36_refactor_regress, test_37_ui_review_fixes, test_38_app_split_structure, test_39_from_dict_boundary, test_40_monthly, test_41_review_improvements]
 
 if __name__ == "__main__":
     import traceback

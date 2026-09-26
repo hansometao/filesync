@@ -51,6 +51,26 @@ def deletion_warning_text(delete_count, rmdir_count=0):
     return "注意：本次将删除 %d 个文件/目录，请核对下方清单后再确认执行" % n
 
 
+# 首次双向同步冲突预警阈值：冲突数达到该值才提示（少量冲突属正常首同步行为）
+FIRST_SYNC_CONFLICT_WARN = 10
+
+
+def first_sync_conflict_warning(conflict_count, has_baseline):
+    # type: (int, bool) -> Optional[str]
+    """首次双向同步冲突总量预警；不满足条件返回 None。
+
+    baseline 为空表示这是该路径对的首次双向同步：两侧同名异容文件
+    会全部进入冲突流程（各自备份一份 .conflict- 副本）。目录巨大时
+    可能产生海量备份文件，预览确认前醒目提示。纯函数，无 tkinter
+    依赖，可无头测试。
+    """
+    if has_baseline or conflict_count < FIRST_SYNC_CONFLICT_WARN:
+        return None
+    return ("注意：这是首次双向同步，检测到 %d 个冲突（两侧同名但内容不同）"
+            "——每个冲突都会先备份落败方副本再覆盖，请确认策略后执行"
+            % conflict_count)
+
+
 class DiffDialog(tk.Toplevel):
     def __init__(self, parent, diff_result, task):
         # type: (tk.Misc, DiffResult, Task) -> None
@@ -78,6 +98,11 @@ class DiffDialog(tk.Toplevel):
         del_warn = deletion_warning_text(self.diff.delete_count, self.diff.rmdir_count)
         if del_warn:
             ttk.Label(frm, text=del_warn, foreground=C_DELETE, style="Error.TLabel").pack(anchor=tk.W)
+        # 首次双向同步冲突总量预警：baseline 为空时两侧同名异容文件全部进冲突流程
+        has_baseline = bool(getattr(self.task, "baseline", None))
+        fs_warn = first_sync_conflict_warning(self.diff.conflict_count, has_baseline)
+        if fs_warn:
+            ttk.Label(frm, text=fs_warn, foreground=C_DELETE, style="Error.TLabel").pack(anchor=tk.W)
 
         cols = ("tag", "kind", "rel", "detail")
         # 差异列表可能上千条：Treeview + 垂直滚动条，保证可滚动查看全部

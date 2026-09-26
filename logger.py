@@ -20,6 +20,22 @@ LEVEL_ERROR = "ERROR"
 LEVEL_DEBUG = "DEBUG"
 
 _MAX_FILE_BYTES = 2 * 1024 * 1024  # 2MB 后轮转
+_ROTATE_GENS = 3  # 轮转保留 .1~.3 三代历史（共约 8MB 日志）
+
+
+def _shift_backups(path):
+    # type: (str) -> None
+    """历史备份顺移：.2->.3、.1->.2（.3 被顶掉丢弃），为当前日志腾出 .1。
+
+    OSError 静默：轮转失败不影响日志主流程（下一次轮转重试）。
+    """
+    for i in range(_ROTATE_GENS - 1, 0, -1):
+        src = "%s.%d" % (path, i)
+        if os.path.exists(src):
+            try:
+                os.replace(src, "%s.%d" % (path, i + 1))
+            except OSError:
+                pass
 
 
 class AppLogger(object):
@@ -52,13 +68,11 @@ class AppLogger(object):
 
     def _reopen(self):
         # type: () -> None
-        # 轮转：超过阈值则备份为 .1
+        # 轮转：超过阈值则历史顺移（保留 .1~.3 多份），当前日志重开
         try:
             if os.path.exists(self._path) and os.path.getsize(self._path) > _MAX_FILE_BYTES:
-                backup = self._path + ".1"
-                if os.path.exists(backup):
-                    os.remove(backup)
-                os.rename(self._path, backup)
+                _shift_backups(self._path)
+                os.rename(self._path, self._path + ".1")
         except OSError:
             pass
         self._file = open(longpath(self._path), "a", encoding="utf-8")
@@ -132,17 +146,15 @@ class AppLogger(object):
 
     def _rotate(self):
         # type: () -> None
-        """运行期轮转：关闭旧文件、rename .1、重开、清零计数（调用方须持锁）。"""
+        """运行期轮转：历史顺移保留 .1~.3、当前日志 rename .1、重开、清零计数（调用方须持锁）。"""
         if self._file is not None:
             try:
                 self._file.close()
             except OSError:
                 pass
-        backup = self._path + ".1"
         try:
-            if os.path.exists(backup):
-                os.remove(backup)
-            os.rename(self._path, backup)
+            _shift_backups(self._path)
+            os.rename(self._path, self._path + ".1")
         except OSError:
             pass
         try:

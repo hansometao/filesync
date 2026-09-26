@@ -689,10 +689,17 @@ def _hash_rels_parallel(root, rels, sizes=None, cancel_event=None, workers=8,
                 out[rel] = fut.result()
             except ScanCancelled:
                 cancelled = True
+                # 已有取消即不会再消费后续结果：把尚未开始的 future 一并
+                # 取消（运行中的无法中断，只能等其当前分块边界退出），
+                # 否则批量取消要逐个等完全部排队任务才算完
+                break
             except Exception:
                 # 单文件哈希意外异常（hash_file 已兜 OSError，此处防御）
                 out[rel] = None
     finally:
+        if cancelled:
+            for _rel, fut in futs:
+                fut.cancel()
         pool.shutdown(wait=True)
     if cancelled:
         raise ScanCancelled()
