@@ -26,7 +26,7 @@ import os
 import shutil
 import stat as stat_mod
 import threading
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from utils.paths import longpath, join_rel, ensure_dir
 from utils.timeutil import is_newer, now_epoch, unique_stamp, MTIME_TOLERANCE
@@ -113,7 +113,7 @@ class DiffResult(object):
 
 
 def _content_differs(a, b, a_path, b_path, cancel_event=None, tolerant=False):
-    # type: (FileMeta, FileMeta, str, str, Optional[Any], bool) -> bool
+    # type: (FileMeta, FileMeta, str, str, Optional[threading.Event], bool) -> bool
     """size 不同即判不同；size 相同且 mtime 完全相等视为相同（copy2 保留 mtime）。
 
     size 相同但 mtime 有差异（含 FAT32 2 秒粒度、<2 秒快速编辑的微差）时，
@@ -140,7 +140,7 @@ def _content_differs(a, b, a_path, b_path, cancel_event=None, tolerant=False):
 
 
 def _classify(snap, rel, baseline, root=None, cancel_event=None, tolerant=False):
-    # type: (Dict[str, FileMeta], str, Dict[str, Dict[str, Any]], Optional[str], Optional[object], bool) -> str
+    # type: (Dict[str, FileMeta], str, Dict[str, Dict[str, Any]], Optional[str], Optional[threading.Event], bool) -> str
     bl = baseline.get(rel)
     if rel not in snap:
         return "removed" if bl is not None else "absent"
@@ -170,7 +170,7 @@ def _classify(snap, rel, baseline, root=None, cancel_event=None, tolerant=False)
 
 def diff(src_snap, dst_snap, task, src_root, dst_root, baseline=None,
          cancel_event=None):
-    # type: (Dict[str, FileMeta], Dict[str, FileMeta], Task, str, str, Optional[Dict[str, Dict[str, Any]]], Optional[object]) -> DiffResult
+    # type: (Dict[str, FileMeta], Dict[str, FileMeta], Task, str, str, Optional[Dict[str, Dict[str, Any]]], Optional[threading.Event]) -> DiffResult
     """根据源/目标快照与任务配置计算待执行动作。
 
     目录条目（FileMeta.is_dir=True）单独处理：单向镜像创建/删除目标侧目录，
@@ -255,7 +255,7 @@ def diff(src_snap, dst_snap, task, src_root, dst_root, baseline=None,
 
 def _reconcile_two(rel, sa, sb, src_snap, dst_snap, sp, dp, task, src_root, dst_root,
                    cancel_event=None, tolerant=False):
-    # type: (str, str, str, Dict[str, FileMeta], Dict[str, FileMeta], str, str, Task, str, str, Optional[object], bool) -> List[Action]
+    # type: (str, str, str, Dict[str, FileMeta], Dict[str, FileMeta], str, str, Task, str, str, Optional[threading.Event], bool) -> List[Action]
     copy_a = Action("copy", rel, "A->B 同步", sp, dp)   # 源 -> 目标
     copy_b = Action("copy", rel, "B->A 同步", dp, sp)   # 目标 -> 源
 
@@ -369,8 +369,25 @@ def _unique_backup(loser):
     return backup
 
 
+def _normalize_ask_policy(policy, on_ask, action):
+    # type: (str, Optional[Callable[[Action], Optional[str]]], Action) -> str
+    """ask 策略经回调落定为具体策略（_resolve_conflict/_resolve_del_conflict 共用）。
+
+    询问回调抛异常或返回无效值时保守跳过：用户"取消询问"的直觉语义
+    是"这次先不动"，而不是激进的 newer 覆盖。非 ask 策略原样返回。
+    """
+    if policy != CONFLICT_ASK or on_ask is None:
+        return policy
+    try:
+        got = on_ask(action)
+    except Exception:
+        got = None
+    valid = (CONFLICT_NEWER, CONFLICT_SOURCE, CONFLICT_TARGET, CONFLICT_SKIP)
+    return got if got in valid else CONFLICT_SKIP
+
+
 def _resolve_conflict(action, policy, on_ask=None):
-    # type: (Action, str, Optional[Any]) -> Tuple[str, bool, bool]
+    # type: (Action, str, Optional[Callable[[Action], Optional[str]]]) -> Tuple[str, bool, bool]
     """处理冲突。返回 (结果描述, 是否失败, 是否未解决)。
 
     备份落败方后再覆盖，确保不丢数据：
@@ -386,15 +403,7 @@ def _resolve_conflict(action, policy, on_ask=None):
     b_path = action.to_path    # 目标侧
     # 冲突动作必然携带两侧路径（diff 构造时保证），assert 仅为类型收窄
     assert a_path is not None and b_path is not None
-    if policy == CONFLICT_ASK and on_ask is not None:
-        # 询问回调抛异常或返回无效值时保守跳过：用户"取消询问"的直觉语义
-        # 是"这次先不动"，而不是激进的 newer 覆盖
-        try:
-            got = on_ask(action)
-        except Exception:
-            got = None
-        valid = (CONFLICT_NEWER, CONFLICT_SOURCE, CONFLICT_TARGET, CONFLICT_SKIP)
-        policy = got if got in valid else CONFLICT_SKIP
+    policy = _normalize_ask_policy(policy, on_ask, action)
     if policy == "skip":
         logger.warn("冲突未处理(跳过): %s" % action.rel)
         return "跳过冲突", False, True
@@ -433,7 +442,7 @@ def _resolve_conflict(action, policy, on_ask=None):
 
 
 def _resolve_del_conflict(action, policy, on_ask=None):
-    # type: (Action, str, Optional[Any]) -> Tuple[str, bool, bool]
+    # type: (Action, str, Optional[Callable[[Action], Optional[str]]]) -> Tuple[str, bool, bool]
     """处理"一侧删除、另一侧修改"冲突。返回 (结果描述, 是否失败, 是否未解决)。
 
     删除意图 vs 修改意图互相矛盾，且删除侧无文件、无时间戳可比：
@@ -448,13 +457,7 @@ def _resolve_del_conflict(action, policy, on_ask=None):
     a_path = action.from_path  # 源侧路径
     b_path = action.to_path    # 目标侧路径
     assert a_path is not None and b_path is not None
-    if policy == CONFLICT_ASK and on_ask is not None:
-        try:
-            got = on_ask(action)
-        except Exception:
-            got = None
-        valid = (CONFLICT_NEWER, CONFLICT_SOURCE, CONFLICT_TARGET, CONFLICT_SKIP)
-        policy = got if got in valid else CONFLICT_SKIP
+    policy = _normalize_ask_policy(policy, on_ask, action)
     if policy == CONFLICT_SKIP:
         logger.warn("删除/修改冲突未处理(跳过): %s" % action.rel)
         return "跳过删除/修改冲突", False, True
@@ -516,7 +519,7 @@ def _safe_mtime(path):
 
 
 def apply_actions(actions, conflict_policy, on_ask=None, cancel_event=None):
-    # type: (List[Action], str, Optional[Any], Optional[Any]) -> Tuple[List[str], int, Set[str], Set[str]]
+    # type: (List[Action], str, Optional[Callable[[Action], Optional[str]]], Optional[threading.Event]) -> Tuple[List[str], int, Set[str], Set[str]]
     """执行动作列表。返回 (日志行列表, 失败数, 未解决冲突 rel 集合, 失败动作 rel 集合)；
     cancel_event 置位时抛 ScanCancelled。
 
@@ -709,7 +712,7 @@ def _hash_rels_parallel(root, rels, sizes=None, cancel_event=None, workers=8,
 def build_baseline_after(task, dst_root, self_paths=None, snap=None,
                          old_baseline=None, dirty_rels=None, cancel_event=None,
                          exclude_rels=None):
-    # type: (Task, str, Optional[Any], Optional[Dict[str, FileMeta]], Optional[Dict[str, Dict[str, Any]]], Optional[Any], Optional[object], Optional[Set[str]]) -> Dict[str, Dict[str, Any]]
+    # type: (Task, str, Optional[Any], Optional[Dict[str, FileMeta]], Optional[Dict[str, Dict[str, Any]]], Optional[Set[str]], Optional[threading.Event], Optional[Set[str]]) -> Dict[str, Dict[str, Any]]
     """同步完成后重建 baseline（双向同步两端一致）。
 
     - snap：diff 阶段的目标侧快照（可含缓存哈希），避免全量重扫重读。
@@ -799,7 +802,7 @@ def build_baseline_after(task, dst_root, self_paths=None, snap=None,
 def apply_diff(task, diff_result, conflict_policy=None, self_paths=None,
                logger=None, on_ask=None, cancel_event=None,
                dst_snap=None):
-    # type: (Any, Any, Optional[str], Optional[Any], Any, Optional[Any], Optional[object], Optional[Dict[str, FileMeta]]) -> Dict[str, Any]
+    # type: (Any, Any, Optional[str], Optional[Any], Any, Optional[Callable[[Action], Optional[str]]], Optional[threading.Event], Optional[Dict[str, FileMeta]]) -> Dict[str, Any]
     """执行既有的 DiffResult（所见即所得：执行的就是预览确认过的动作集合）。
 
     内部完成动作执行、失败统计、baseline 重建与任务状态更新。
@@ -845,7 +848,7 @@ def apply_diff(task, diff_result, conflict_policy=None, self_paths=None,
 
 def perform_sync(task, logger=None, conflict_override=None, dry_run=False,
                  self_paths=None, progress=None, on_ask=None, cancel_event=None):
-    # type: (Task, Any, Optional[str], bool, Optional[Any], Optional[Any], Optional[Any], Optional[object]) -> Dict[str, Any]
+    # type: (Task, Any, Optional[str], bool, Optional[Any], Optional[Callable[[str], None]], Optional[Callable[[Action], Optional[str]]], Optional[threading.Event]) -> Dict[str, Any]
     """完整同步流程：扫描 -> 对比 ->（dry_run 预览 | 交 apply_diff 执行）。
 
     返回 dict：{diff, logs, changed, src_snap, dst_snap, fail_count}。
