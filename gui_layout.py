@@ -525,21 +525,18 @@ class LayoutMixin(object):
         # F_BRAND   = ("", 14, "bold") # 品牌名
 
         # ---------- 卡片容器 ----------
-        # relief=tk.SOLID 只在下/右侧显色，不显 lightcolor/darkcolor 时边框
-        # 呈"半边框"（左/上无色）的不对称细线；且默认取 clam 主题的 XFCE 暖灰
-        # （#eeebe7/#cfcdc8）——clam 恒存在故恒被选中，与本项目中性灰不搭，
-        # 切深色模式后更会给 #2D2D2D 卡片描一圈亮暖白边。显式指定
-        # lightcolor=darkcolor=border 得到对称 1px 细边，且随主题切换。
+        # 去边框纯色块风格：卡片不描边，边界完全由"页面底 vs 卡片底"的色差
+        # 与卡片间距界定。原先 relief=SOLID+borderwidth=1 的描边会带来两个
+        # 问题：一是 SOLID 只在下/右侧显色形成不对称"半边框"，二是边框色
+        # 取自 clam 主题暖灰、与本项目中性灰不搭；改为无边框后一并消失。
+        # 色差下限由 test_45 的 WCAG 对比度断言守住（浅色须 >= 1.15）。
         style.configure("Card.TFrame", background=card_bg,
-                        relief=tk.SOLID, borderwidth=1,
-                        lightcolor=border, darkcolor=border)
+                        relief=tk.FLAT, borderwidth=0)
         style.configure("CardSelected.TFrame", background=brand_light,
-                        relief=tk.SOLID, borderwidth=1,
-                        lightcolor=border, darkcolor=border)
+                        relief=tk.FLAT, borderwidth=0)
         # 悬停态：比选中更淡的主色底（TaskCard 悬停联动用）
         style.configure("CardHover.TFrame", background=card_hover,
-                        relief=tk.SOLID, borderwidth=1,
-                        lightcolor=border, darkcolor=border)
+                        relief=tk.FLAT, borderwidth=0)
         style.configure("CardHost.TFrame", background=bg)
 
         # ---------- TButton（全局默认） ----------

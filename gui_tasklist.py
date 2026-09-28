@@ -2,7 +2,7 @@
 
 从 gui_app.py 拆出的 UI 渲染层：
 - 配色变量（青绿色主题）
-- _short_path 路径截断工具
+- _ellipsize_end/_ellipsize_mid 按像素宽度省略文本
 - TaskCard 单张任务卡片（Canvas 嵌入 Frame，可滚动）
 - _MODE_LABEL 模式显示标签
 
@@ -13,7 +13,7 @@ import sys
 
 import tkinter as tk
 from tkinter import ttk
-from typing import Any, Optional
+from typing import Any, Callable, Optional, Tuple
 
 from config import MODE_ONE_WAY, MODE_TWO_WAY, Task
 from scheduler import Scheduler
@@ -28,7 +28,7 @@ C_BRAND_LIGHT = "#E0F2F1"     # 主色淡底（卡片选中态）
 C_DELETE = "#E57373"          # 删除按钮边框
 C_WARN = "#FFB74D"            # 警告/待处理
 C_OK = "#26A69A"              # 成功对勾（同主色）
-C_BG = "#FAFAFA"              # 页面背景
+C_BG = "#ECECEC"              # 页面背景（去边框风格：须与卡片底有可辨色差）
 C_CARD_BG = "#FFFFFF"         # 卡片背景
 C_CARD_BG_ALT = "#F5F5F5"     # 卡片交替背景
 C_CARD_HOVER = "#F0F7F6"      # 卡片悬停底色（比选中态 C_BRAND_LIGHT 更淡）
@@ -60,17 +60,6 @@ C_DARK_TEXT_DISABLED = "#606060" # 深色禁用态文字
 C_DARK_BORDER = "#404040"      # 深色分隔线
 C_DARK_BRAND_LIGHT = "#1A3A38" # 深色选中态底色
 
-# ---------- 工具：截断中间路径（保留首尾） ----------
-def _short_path(p, max_len=36):
-    # type: (str, int) -> str
-    """过长路径截断为 首段...末段，例如 /home/user/.../data/file.txt"""
-    if len(p) <= max_len:
-        return p
-    head = p[:max_len // 2 - 2]
-    tail = p[-(max_len // 2 - 1):]
-    return head + "..." + tail
-
-
 def _switch_radius(ch):
     # type: (int) -> int
     """开关滑块半径（按轨道高推导，纯函数可无头测试）。
@@ -81,6 +70,77 @@ def _switch_radius(ch):
     """
     track_h = ch - 8
     return max(1, track_h // 2 - 1)
+
+
+# ---------- 卡片间距（单一来源） ----------
+# 去边框后卡片边界全靠色差 + 间距界定，间距过紧会让相邻卡片糊成一片；
+# 三个 pack 点必须同值，故收敛为常量而非各写各的。
+CARD_PADX = 4
+CARD_PADY = 5
+
+# ---------- 工具：按像素宽度省略文本 ----------
+# tk.Label 没有原生 ellipsize，超宽即硬裁（无省略号）；按固定字符数截断
+# 又与实际字号/DPI 脱节（中英文宽度差近一倍）。故按字体实测像素做二分
+# 裁剪。measure 由调用方注入（tkfont.Font.measure），保持纯函数可无头测试。
+
+_ELLIPSIS = "…"
+
+
+def _ellipsize_end(text, measure, max_px):
+    # type: (str, Callable[[str], int], int) -> str
+    """末尾省略：保留前缀 + 省略号（用于任务名，尾部用于区分同名任务）。
+
+    严格契约：返回值宽度恒 <= max_px。连一个省略号都放不下时返回空串
+    （而非硬塞省略号越界）——实践中卡片可用宽度有数百 px，该分支仅防御。
+    """
+    if max_px <= 0:
+        return ""
+    if measure(text) <= max_px:
+        return text
+    if measure(_ELLIPSIS) > max_px:
+        return ""
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if measure(text[:mid]) + measure(_ELLIPSIS) <= max_px:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo] + _ELLIPSIS
+
+
+def _ellipsize_mid(text, measure, max_px):
+    # type: (str, Callable[[str], int], int) -> str
+    """中间省略：保留首尾段 + 省略号（用于路径，首尾目录名才是识别线索）。
+
+    两段按保留字符数均分（头多一个），随保留字符数单调变宽，故可二分。
+    同样遵守"返回宽度恒 <= max_px"；"首字符+省略号"都放不下时返回空串，
+    避免出现"…/…"这种既丢头又丢尾的最差结果。
+    """
+    if max_px <= 0:
+        return ""
+    if measure(text) <= max_px:
+        return text
+    if measure(_ELLIPSIS) + measure(text[:1]) > max_px:
+        return ""
+    lo, hi = 1, len(text) - 1
+    best = 0
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        head = (mid + 1) // 2
+        tail = mid - head
+        cand = (text[:head] + _ELLIPSIS + text[len(text) - tail:]) if tail \
+            else (text[:head] + _ELLIPSIS)
+        if measure(cand) <= max_px:
+            best = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    if best == 0:
+        return ""
+    head = (best + 1) // 2
+    tail = best - head
+    return text[:head] + _ELLIPSIS + (text[len(text) - tail:] if tail else "")
 
 
 # ======================================================================
@@ -111,68 +171,31 @@ class TaskCard(ttk.Frame):
         self._sel_bar = tk.Frame(self, bg=C_BRAND, width=4)
 
         # ---- 内层 body：承载内容内缩 ----
-        body = ttk.Frame(self, style="Card.TFrame", padding=(14, 10))
+        body = ttk.Frame(self, style="Card.TFrame", padding=(14, 8))
         body.pack(fill=tk.BOTH, expand=True)
 
-        # ---- 左侧：圆形开关（Canvas 自绘，比 Checkbutton 好看） ----
-        self._sw_canvas = tk.Canvas(body, width=44, height=24,
-                                    bg=C_CARD_BG, highlightthickness=0,
-                                    bd=0)
-        self._sw_canvas.pack(side=tk.LEFT, padx=(0, 12))
-        self._sw_canvas.bind("<Button-1>", self._on_toggle_switch)
+        # ---- 右侧固定区：状态 / 下次运行 / 操作按钮 ----
+        # pack 顺序关键：固定的右侧必须先于可伸缩的左侧 pack。tk.pack 按调用
+        # 顺序分配 cavity，空间不足时先到的 expand 控件会吃掉全部剩余、
+        # 后 pack 的固定控件被压成 0 宽（按钮直接消失）。此前顺序相反，
+        # 最小窗口宽度(760px)下路径行需求超出可用宽度 78px，运行/编辑/删除
+        # 三键即被裁掉。
+        self._right = ttk.Frame(body, style="Card.TFrame")
+        self._right.pack(side=tk.RIGHT, padx=(8, 0), anchor=tk.N)
 
-        # ---- 中间信息区 ----
-        info = ttk.Frame(body, style="Card.TFrame")
-        info.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        # 上：状态标记
+        self._status_lbl = tk.Label(self._right, font=("", 10, "bold"),
+                                    bg=C_CARD_BG, anchor="e")
+        self._status_lbl.pack(anchor=tk.E)
 
-        # 名称行：任务名 + 模式徽标（单向镜像/双向同步）
-        name_row = ttk.Frame(info, style="Card.TFrame")
-        name_row.pack(anchor=tk.W, fill=tk.X)
+        # 中：下次运行
+        self._next_lbl = tk.Label(self._right, font=("", 9), fg=C_TEXT_MUTED,
+                                  bg=C_CARD_BG, anchor="e")
+        self._next_lbl.pack(anchor=tk.E)
 
-        self._name_lbl = tk.Label(name_row, font=("", 11, "bold"),
-                                  fg=C_TEXT, bg=C_CARD_BG, anchor="w")
-        self._name_lbl.pack(side=tk.LEFT)
-
-        # P0-5 修复：模式徽标（原表格有"方向"列，卡片化后回归）
-        self._mode_lbl = tk.Label(name_row, font=("", 8),
-                                  fg=C_TEXT_MUTED, bg=C_CARD_BG, anchor="w")
-        self._mode_lbl.pack(side=tk.LEFT, padx=(8, 0), pady=(2, 0))
-
-        # 路径 + 调度信息合并为一行（用 · 分隔）
-        detail_row = ttk.Frame(info, style="Card.TFrame")
-        detail_row.pack(anchor=tk.W, fill=tk.X, pady=(2, 0))
-
-        self._path_lbl = tk.Label(detail_row, font=("", 9), fg=C_TEXT_MUTED,
-                                  bg=C_CARD_BG, anchor="w")
-        self._path_lbl.pack(side=tk.LEFT)
-
-        self._sched_sep = tk.Label(detail_row, text=" · ", font=("", 9),
-                                   fg=C_TEXT_DISABLED, bg=C_CARD_BG)
-        self._sched_sep.pack(side=tk.LEFT)
-
-        self._sched_lbl = tk.Label(detail_row, font=("", 9), fg=C_TEXT_MUTED,
-                                   bg=C_CARD_BG, anchor="w")
-        self._sched_lbl.pack(side=tk.LEFT)
-
-        # ---- 右侧：上层=状态+下次运行，下层=操作按钮 ----
-        right = ttk.Frame(body, style="Card.TFrame")
-        right.pack(side=tk.RIGHT, padx=(8, 0))
-
-        # 上层：状态标记 + 下次运行（水平紧凑排列）
-        info_row = ttk.Frame(right, style="Card.TFrame")
-        info_row.pack(anchor=tk.E)
-
-        self._status_lbl = tk.Label(info_row, font=("", 10, "bold"),
-                                    bg=C_CARD_BG)
-        self._status_lbl.pack(side=tk.LEFT, padx=(0, 6))
-
-        self._next_lbl = tk.Label(info_row, font=("", 9), fg=C_TEXT_MUTED,
-                                  bg=C_CARD_BG)
-        self._next_lbl.pack(side=tk.LEFT)
-
-        # 下层：操作按钮组（运行 / 编辑 / 删除）
-        self._btn_frame = ttk.Frame(right, style="Card.TFrame")
-        self._btn_frame.pack(anchor=tk.E, pady=(4, 0))
+        # 下：操作按钮组（运行 / 编辑 / 删除）
+        self._btn_frame = ttk.Frame(self._right, style="Card.TFrame")
+        self._btn_frame.pack(anchor=tk.E, pady=(6, 0))
 
         self._run_btn = ttk.Button(
             self._btn_frame, text="▶ 运行", width=6,
@@ -189,14 +212,54 @@ class TaskCard(ttk.Frame):
             style="Danger.TButton", command=self._on_delete)
         self._del_btn.pack(side=tk.LEFT)
 
+        # ---- 左侧可伸缩区：四层信息（层1 识别 / 层2 路径 / 层3 调度） ----
+        self._left = ttk.Frame(body, style="Card.TFrame")
+        self._left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # 层1：开关 + 任务名 + 模式徽标
+        name_row = ttk.Frame(self._left, style="Card.TFrame")
+        name_row.pack(anchor=tk.W, fill=tk.X)
+
+        self._sw_canvas = tk.Canvas(name_row, width=44, height=24,
+                                    bg=C_CARD_BG, highlightthickness=0,
+                                    bd=0)
+        self._sw_canvas.pack(side=tk.LEFT, anchor=tk.W, padx=(0, 10))
+        self._sw_canvas.bind("<Button-1>", self._on_toggle_switch)
+
+        self._name_lbl = tk.Label(name_row, font=("", 11, "bold"),
+                                  fg=C_TEXT, bg=C_CARD_BG, anchor="w")
+        self._name_lbl.pack(side=tk.LEFT)
+
+        # P0-5 修复：模式徽标（原表格有"方向"列，卡片化后回归）
+        self._mode_lbl = tk.Label(name_row, font=("", 8),
+                                  fg=C_TEXT_MUTED, bg=C_CARD_BG, anchor="w")
+        self._mode_lbl.pack(side=tk.LEFT, padx=(8, 0))
+
+        # 层2：路径独占一行（最易变化且需完整可读，独立成行不与时间信息挤占）
+        detail_row = ttk.Frame(self._left, style="Card.TFrame")
+        detail_row.pack(anchor=tk.W, fill=tk.X)
+
+        self._path_lbl = tk.Label(detail_row, font=("", 9), fg=C_TEXT_MUTED,
+                                  bg=C_CARD_BG, anchor="w")
+        self._path_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # 层3：调度 + 上次运行
+        sched_row = ttk.Frame(self._left, style="Card.TFrame")
+        sched_row.pack(anchor=tk.W, fill=tk.X)
+
+        self._sched_lbl = tk.Label(sched_row, font=("", 9), fg=C_TEXT_MUTED,
+                                   bg=C_CARD_BG, anchor="w")
+        self._sched_lbl.pack(side=tk.LEFT)
+
         # 右键菜单 / 选中 / 双击运行 绑定（整卡都响应）
         # C2 修复：_sw_canvas 必须从本循环剔除——tkinter bind 是替换语义，
         # 若在此对 _sw_canvas 再绑 <Button-1>，会覆盖 __init__ 中开关的切换
         # 绑定，导致开关失效；且会绑 <Double-Button-1> 让快速点两下开关误触
-        # 同步。开关仅保留第 98 行的切换绑定与单独右键菜单。
-        for w in (self, body, info, name_row, self._name_lbl,
-                  self._mode_lbl, self._path_lbl, self._sched_lbl, right,
-                  self._next_lbl, self._btn_frame, self._status_lbl):
+        # 同步。开关仅保留单独的切换绑定与右键菜单。
+        for w in (self, body, self._left, self._right, name_row,
+                  detail_row, sched_row, self._name_lbl, self._mode_lbl,
+                  self._path_lbl, self._sched_lbl, self._next_lbl,
+                  self._btn_frame, self._status_lbl):
             try:
                 w.bind("<Button-3>", self._on_context_menu)
                 w.bind("<Button-1>", self._on_click)
@@ -219,10 +282,11 @@ class TaskCard(ttk.Frame):
         # 避免高频重绘抖动；选中态不参与（保留选中底色）
         self._hover = False
         self._hover_after = None  # type: Optional[str]
-        self._hover_widgets = (self, body, info, name_row, self._name_lbl,
+        self._hover_widgets = (self, body, self._left, self._right, name_row,
+                               detail_row, sched_row, self._name_lbl,
                                self._mode_lbl, self._path_lbl, self._sched_lbl,
-                               self._sched_sep, right, self._next_lbl,
-                               self._btn_frame, self._status_lbl)
+                               self._next_lbl, self._btn_frame,
+                               self._status_lbl)
         for w in self._hover_widgets:
             try:
                 w.bind("<Enter>", self._on_hover_enter)
@@ -232,15 +296,22 @@ class TaskCard(ttk.Frame):
         # bg 重绘仅针对 tk.Label（ttk 部件底色由 CardHover.TFrame 样式统一控制，
         # 对 ttk.Frame 逐个 configure(bg=) 是无效选项）
         self._hover_labels = (self._name_lbl, self._mode_lbl, self._path_lbl,
-                              self._sched_lbl, self._sched_sep, self._next_lbl,
+                              self._sched_lbl, self._next_lbl,
                               self._status_lbl)
 
         # 卡片内所有 ttk 容器：ttk.Frame 背景不透明，style 固定在
         # Card.TFrame 就不会跟随卡片自身 style 变化——选中/悬停时卡片本体
         # 变淡青绿而这些容器仍为白底，文字之间露出白色间隙（斑驳感）。
         # 故统一登记，set_selected/_apply_hover/_on_hover_leave 一并切换。
-        self._card_frames = (body, info, name_row, detail_row,
-                             right, info_row, self._btn_frame)
+        self._card_frames = (body, self._left, self._right, name_row,
+                             detail_row, sched_row, self._btn_frame)
+
+        # ---- 文本自适应：按可用像素重算省略（不再按固定字符数硬截） ----
+        # refresh 只存全量文本到 *_full，由 _refit_text 结合卡片实测宽度
+        # 决定显示多少；宽度变化时 <Configure> 会重算。
+        self._name_full = ""
+        self._path_full = ""
+        self._fonts = None  # type: Optional[Tuple[Any, Any, Any]]
 
     def _set_card_style(self, style_name):
         # type: (str) -> None
@@ -344,8 +415,49 @@ class TaskCard(ttk.Frame):
         self._app._run_card_task(self._id)
 
     def _on_configure(self, _evt=None):
-        # 选中态由 App._select_card 控制样式，这里仅保证卡片高度一致
-        pass
+        # 卡片宽度变化（窗口缩放/重排）时按新宽度重算名称与路径的省略量
+        self._refit_text()
+
+    def _measure_fonts(self):
+        # type: () -> Tuple[Any, Any, Any]
+        """惰性创建三个字体的测量器（tkfont.Font 持有需长期存活，故缓存）。"""
+        if self._fonts is None:
+            import tkinter.font as tkfont
+            self._fonts = (
+                tkfont.Font(family="", size=11, weight="bold"),   # 名称
+                tkfont.Font(family="", size=9),                    # 路径
+                tkfont.Font(family="", size=8),                    # 模式徽标
+            )
+        return self._fonts
+
+    def _refit_text(self):
+        # type: () -> None
+        """按当前可用像素重算名称（末尾省略）与路径（中间省略）显示文本。
+
+        可用宽度 = 卡片实测宽 - 右侧固定区 - 开关 - 模式徽标 - 间距。
+        未完成布局时（宽度为 1）直接返回，等 <Configure> 再来一次。
+        """
+        total = self.winfo_width()
+        if total <= 1:
+            return
+        try:
+            right_w = self._right.winfo_reqwidth()
+        except tk.TclError:
+            return
+        f_name, f_path, f_mode = self._measure_fonts()
+        # 卡片内边距(body 左右各 14) + 右侧区间距(8) + 开关(44) + 开关后间距(10)
+        avail = total - 28 - 8 - 44 - 10
+        if avail <= 24:
+            return
+        # 名称需为模式徽标留出实测宽度
+        mode_w = f_mode.measure(self._mode_lbl.cget("text")) + 8
+        name_px = avail - mode_w
+        if name_px > 10:
+            self._name_lbl.config(text=_ellipsize_end(
+                self._name_full, f_name.measure, name_px))
+        if avail > 10:
+            self._path_lbl.config(text=_ellipsize_mid(
+                self._path_full, f_path.measure, avail))
 
     # ---- 渲染：刷新内容 ----
     def _card_bg(self):
@@ -372,11 +484,14 @@ class TaskCard(ttk.Frame):
         muted_c = self._text_muted_color()
         dis_c = self._text_disabled_color()
         running = self._app.scheduler.is_task_running(task.id)
-        self._name_lbl.config(text=task.name, fg=text_c, bg=card_bg)
+        # 名称与路径存全量文本，显示量交给 _refit_text 按实测宽度决定
+        # （原按固定 36 字符硬截，与字号/DPI 脱节且窄窗口下仍会溢出）
+        self._name_full = task.name
+        self._path_full = "%s → %s" % (task.source, task.target)
+        self._name_lbl.config(fg=text_c, bg=card_bg)
         self._mode_lbl.config(text=_MODE_LABEL.get(task.mode, task.mode), bg=card_bg)
-        self._path_lbl.config(
-            text="%s → %s" % (_short_path(task.source), _short_path(task.target)),
-            bg=card_bg)
+        self._path_lbl.config(bg=card_bg)
+        self._refit_text()
 
         if task.schedule.enabled and task.enabled:
             stype = task.schedule.type
@@ -457,7 +572,13 @@ class TaskCard(ttk.Frame):
 
     def set_selected(self, sel):
         # type: (bool) -> None
-        """选中态：淡青绿底 + 1px 主色边框 + 左侧主色竖条（三通道指示）。"""
+        """选中态：淡青绿底 + 左侧主色竖条。
+
+        去边框后卡片无描边，选中由两个通道指示：专属底色 + 左侧 4px 主色
+        竖条（place(relheight=1.0) 贴合全高）。曾有第三条"1px 主色边框"
+        通道，但统一细边框时把它也设成了灰色 border，通道实际已不存在，
+        故此处不再声称。
+        """
         self._selected = sel
         self._cancel_hover()
         dark = getattr(self._app, "_dark_mode", False)

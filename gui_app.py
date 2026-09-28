@@ -42,7 +42,7 @@ from gui_layout import LayoutMixin, BTN_ADD_TEXT
 from gui_tasklist import (  # noqa: F401  (配色常量被本模块 UI 构建引用)
     TaskCard,
     _MODE_LABEL,
-    _short_path,
+    CARD_PADX, CARD_PADY,
     C_BRAND, C_BRAND_DARK, C_BRAND_LIGHT,
     C_DELETE, C_WARN, C_OK,
     C_BG, C_CARD_BG, C_CARD_BG_ALT,
@@ -310,7 +310,7 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin, LayoutMixin):
             assert self._task_inner is not None
             for t in tasks:
                 card = TaskCard(self._task_inner, self, t.id)
-                card.pack(fill=tk.X, padx=2, pady=3)
+                card.pack(fill=tk.X, padx=CARD_PADX, pady=CARD_PADY)
                 self._task_rows[t.id] = card
                 card.refresh(t)
             # 空态提示
@@ -343,7 +343,7 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin, LayoutMixin):
                     self._task_rows[t.id].refresh(t)
                 else:
                     card = TaskCard(self._task_inner, self, t.id)
-                    card.pack(fill=tk.X, padx=2, pady=3)
+                    card.pack(fill=tk.X, padx=CARD_PADX, pady=CARD_PADY)
                     self._task_rows[t.id] = card
                     card.refresh(t)
                     # 恢复选中态（新插入的）
@@ -467,7 +467,7 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin, LayoutMixin):
             elif status_filter == "失败" and t.last_status != "失败":
                 match = False
             if match:
-                card.pack(fill=tk.X, padx=2, pady=3)
+                card.pack(fill=tk.X, padx=CARD_PADX, pady=CARD_PADY)
             else:
                 card.pack_forget()
 

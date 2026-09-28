@@ -3176,13 +3176,24 @@ def test_43_line_quality():
     _super = re.search(r"super\(\)\.__init__\(([^)]*)\)", _src_card, re.S)
     check(_super is not None and "padding=0" in _super.group(1),
           "43: A 卡片本体 padding=0(否则 place 贴不到左缘)")
-    check("padding=(14, 10)" in _src_card,
-          "43: A padding 下移到内层 body(内容内缩量不变)")
+    # 只需左右内缩保持 14（上下可随布局密度调整），且 padding 落在内层 body
+    check(re.search(r'body\s*=\s*ttk\.Frame\([^)]*padding=\(\s*14\s*,', _src_card)
+          is not None,
+          "43: A padding 下移到内层 body(内容左右内缩 14 不变)")
 
     # ================= B. 统一细边框 =================
+    # 注：卡片与描边按钮的去留已随"去边框极简"需求变更（见 test_45）：
+    # 卡片改为完全不描边，边界由底色差 + 间距界定；描边按钮仍保留边框，
+    # 需显式配色以消除 SOLID 的半边框不对称。
     _src_style = inspect.getsource(_gl43.LayoutMixin._setup_style)
-    for _sty in ("Card.TFrame", "CardSelected.TFrame", "CardHover.TFrame",
-                 "Outline.TButton", "Danger.TButton"):
+    for _sty in ("Card.TFrame", "CardSelected.TFrame", "CardHover.TFrame"):
+        _blk = re.search(
+            r'style\.configure\(\s*"%s"(.*?)\)\s*\n' % re.escape(_sty),
+            _src_style, re.S)
+        check(_blk is not None and "borderwidth=0" in _blk.group(1)
+              and "relief=tk.FLAT" in _blk.group(1),
+              "43: B %s 已去边框(改由底色差界定边界)" % _sty)
+    for _sty in ("Outline.TButton", "Danger.TButton"):
         _blk = re.search(
             r'style\.configure\(\s*"%s"(.*?)\)\s*\n' % re.escape(_sty),
             _src_style, re.S)
@@ -3191,7 +3202,7 @@ def test_43_line_quality():
               "43: B %s 显式 lightcolor/darkcolor(对称细边+主题化)" % _sty)
     # 边框色必须来自主题变量 border（浅 C_BORDER / 深 C_DARK_BORDER）
     check(re.search(r"lightcolor=border\b", _src_style) is not None,
-          "43: B 边框色取主题 border(深浅各自正确)")
+          "43: B 描边按钮边框色取主题 border(深浅各自正确)")
     # relief=SOLID 只在下/右侧显色，形成"半边框"；必须配对称 light/darkcolor
     check("relief=tk.SOLID" in _src_style and "lightcolor" in _src_style,
           "43: B SOLID 立体边已配对称色消除半边框")
@@ -3293,7 +3304,218 @@ def test_43_line_quality():
     assert len(failures) == _fail_base, "test_43: 本节有断言失败"
 
 
-TESTS = [test_1, test_2, test_3_run_now, test_2b_D_mtime, test_3b, test_3c_interval_last_run, test_4, test_5_save, test_6_M4, test_7_2s, test_8_M10_baseline, test_9_L4, test_10_CLI_run_cli, test_11_S1_SE1, test_12_include, test_13_interval_next_run, test_14_run_now, test_15_daily, test_16_logger, test_17, test_18_config_baseline, test_19_GUI, test_20_utils_paths, test_21_utils_timeutil, test_22_scanner, test_23_config_Task, test_24_logger_close, test_25_GUI_mock, test_26_run_now_next_run, test_27_fail_count, test_28_mkdir_type_conflict, test_29_F4_interval, test_30_F5_daily, test_31_F6_baseline, test_32_C1_C2, test_33_tray_autostart, test_34_fast_FAT32, test_35_vs_skip, test_36_refactor_regress, test_37_ui_review_fixes, test_38_app_split_structure, test_39_from_dict_boundary, test_40_monthly, test_41_review_improvements, test_42_shortcut_dataloss, test_43_line_quality]
+def test_44_card_layout():
+    # type: () -> None
+    """自测节 44. 卡片内容布局：四层重排/pack 优先级/像素级省略"""
+    _fail_base = len(failures)
+    print("[44] 卡片内容布局（四层重排 / 右侧不被裁 / 名称末尾省略）")
+    import inspect
+
+    _tk44 = sys.modules.get("tkinter")
+    if _tk44 is not None and not hasattr(_tk44, "scrolledtext"):
+        import types as _types44
+        _st44 = _types44.ModuleType("tkinter.scrolledtext")
+        _st44.ScrolledText = type("ScrolledText", (object,),
+                                  {"__init__": lambda self, *a, **k: None})
+        _tk44.scrolledtext = _st44
+        sys.modules["tkinter.scrolledtext"] = _st44
+    import gui_tasklist as _gtl44
+
+    # ============ A. 像素级省略纯函数 ============
+    check(getattr(_gtl44, "_ellipsize_end", None) is not None,
+          "44: A 存在 _ellipsize_end 末尾省略纯函数")
+    check(getattr(_gtl44, "_ellipsize_mid", None) is not None,
+          "44: A 存在 _ellipsize_mid 中间省略纯函数(路径保首尾段)")
+
+    def _m(chw):
+        # 每字符 chw 像素的测量函数
+        return lambda t: len(t) * chw
+
+    check(_gtl44._ellipsize_end("短", _m(10), 100) == "短",
+          "44: A 未超宽时原样返回")
+    r44 = _gtl44._ellipsize_end("abcdefghij", _m(10), 50)
+    check(r44.endswith("…") and r44.startswith("abc"),
+          "44: A 超宽时末尾省略并保留前缀: %r" % r44)
+    check(_m(10)(r44) <= 50,
+          "44: A 末尾省略后宽度不超限(%d <= 50)" % _m(10)(r44))
+    # 极窄：连"省略号"都放不下时严格返回空串，不硬塞越界结果
+    check(_gtl44._ellipsize_end("abcdefghij", _m(10), 5) == "",
+          "44: A 极窄输入返回空串而非越界的省略号")
+    # 中间省略须两端都保留段名（路径识别靠首尾目录）
+    rm44 = _gtl44._ellipsize_mid("aaa/bbb/ccc/ddd", _m(10), 90)
+    check(rm44.startswith("a") and rm44.endswith("d") and "…" in rm44,
+          "44: A 中间省略保留首尾: %r" % rm44)
+    check(_m(10)(rm44) <= 90,
+          "44: A 中间省略后宽度不超限(%d <= 90)" % _m(10)(rm44))
+    check(_gtl44._ellipsize_mid("ab/cd", _m(10), 100) == "ab/cd",
+          "44: A 中间省略未超宽时原样返回")
+    # 严格契约：任意宽度档（含不可容纳最小结果的档位）均不越界
+    _ovf = []
+    for _w in range(0, 80):
+        for _fn44 in (_gtl44._ellipsize_end, _gtl44._ellipsize_mid):
+            for _s44 in ("任务名称很长需要截断处理", "/home/u/pr/assets",
+                         "a", ""):
+                _g44 = _fn44(_s44, _m(10), _w)
+                if _m(10)(_g44) > _w:
+                    _ovf.append("%s(%r,%d)=%r" % (_fn44.__name__, _s44, _w, _g44))
+    check(not _ovf, "44: A 全宽度档不越界(违例: %s)" % ("; ".join(_ovf[:2]) or "-"))
+
+    # ============ B. 四层结构 ============
+    _src44 = inspect.getsource(_gtl44.TaskCard.__init__)
+    # 四层：名称行(含开关) / 路径行 / 调度行 / 按钮行
+    for _nm in ("_name_lbl", "_mode_lbl", "_path_lbl", "_sched_lbl",
+                "_status_lbl", "_next_lbl", "_btn_frame"):
+        check(_nm in _src44, "44: B 四层结构保留 %s" % _nm)
+    # 开关与名称同行（不再单独占一整行）
+    check(re.search(r"_sw_canvas\.pack\(", _src44) is not None,
+          "44: B 开关 pack 在名称行容器内")
+    check(re.search(r"_sw_canvas\.pack\([^)]*anchor", _src44) is not None,
+          "44: B 开关左对齐于名称行")
+
+    # ============ C. pack 优先级：右侧固定区必须先于 expand 区 pack ============
+    # 空间不足时 tk.pack 先到的 expand 控件会吃掉全部 cavity，
+    # 后 pack 的固定宽度控件被压成 0 宽（按钮直接消失）。
+    _i_right = _src44.find('self._right.pack(')
+    _i_left = _src44.find('self._left.pack(')
+    check(_i_right != -1 and _i_left != -1,
+          "44: C 左右区均显式命名(_right/_left)便于校验 pack 序")
+    if _i_right != -1 and _i_left != -1:
+        check(_i_right < _i_left,
+              "44: C 右侧固定区先 pack(否则被左侧 expand 抢占裁剪)")
+    # 左侧仍是可伸缩区，右侧不设 expand
+    check(re.search(r"self\._left\.pack\([^)]*expand=True", _src44) is not None,
+          "44: C 左侧为唯一可伸缩区")
+    # 逐行判定：正则的 [^)]* 会被 pack(side=tk.RIGHT, padx=(8, 0), ...) 里
+    # 内嵌的括号截断而漏检，故直接取该行代码文本判断
+    _right_line44 = ""
+    for _l44 in _src44.splitlines():
+        if "self._right.pack(" in _l44:
+            _right_line44 = _l44.split("#")[0]
+            break
+    check("expand" not in _right_line44,
+          "44: C 右侧固定区不设 expand(否则抢不到优先分配)")
+
+    # ============ D. 按可用像素自适应重排 ============
+    check(getattr(_gtl44.TaskCard, "_refit_text", None) is not None,
+          "44: D 存在 _refit_text 按可用像素重算省略文本")
+    _refit = inspect.getsource(_gtl44.TaskCard._refit_text)
+    check("_ellipsize_end" in _refit,
+          "44: D 名称使用末尾省略")
+    check("_ellipsize_mid" in _refit,
+          "44: D 路径使用中间省略(保留首尾目录)")
+    # refresh 只存全量文本，不直接写截断后的短文本
+    _ref = inspect.getsource(_gtl44.TaskCard.refresh)
+    check("_name_full" in _ref or "_refit_text" in _ref,
+          "44: D refresh 走全量文本 + 重排(不再固定 36 字符截断)")
+    # <Configure> 必须接线重排（原实现是空 pass）
+    check("pass" not in inspect.getsource(_gtl44.TaskCard._on_configure).split("\n")[-2:][0]
+          or "_refit_text" in inspect.getsource(_gtl44.TaskCard._on_configure),
+          "44: D <Configure> 已接线重排(原为空实现)")
+    check("_refit_text" in inspect.getsource(_gtl44.TaskCard._on_configure),
+          "44: D _on_configure 调用 _refit_text")
+
+    assert len(failures) == _fail_base, "test_44: 本节有断言失败"
+
+
+def test_45_card_edge():
+    # type: () -> None
+    """自测节 45. 卡片边缘：去边框纯色块（色差可辨 + 选中指示不丢失）"""
+    _fail_base = len(failures)
+    print("[45] 卡片边缘（去边框 / 色差可辨 / 选中指示保留）")
+    import inspect
+
+    _tk45 = sys.modules.get("tkinter")
+    if _tk45 is not None and not hasattr(_tk45, "scrolledtext"):
+        import types as _types45
+        _st45 = _types45.ModuleType("tkinter.scrolledtext")
+        _st45.ScrolledText = type("ScrolledText", (object,),
+                                  {"__init__": lambda self, *a, **k: None})
+        _tk45.scrolledtext = _st45
+        sys.modules["tkinter.scrolledtext"] = _st45
+    import gui_tasklist as _gtl45
+    import gui_layout as _gl45
+
+    def _lum(hexc):
+        # WCAG 相对亮度
+        v = [int(hexc[i:i + 2], 16) / 255.0 for i in (1, 3, 5)]
+        f = lambda c: c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+        r, g, b = [f(c) for c in v]
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    def _contrast(c1, c2):
+        a, b = _lum(c1), _lum(c2)
+        hi, lo = max(a, b), min(a, b)
+        return (hi + 0.05) / (lo + 0.05)
+
+    # ============ A. 卡片不描边 ============
+    _sty45 = inspect.getsource(_gl45.LayoutMixin._setup_style)
+    for _sty in ("Card.TFrame", "CardSelected.TFrame", "CardHover.TFrame"):
+        _blk = re.search(r'style\.configure\(\s*"%s"(.*?)\)\s*\n'
+                         % re.escape(_sty), _sty45, re.S)
+        check(_blk is not None and "borderwidth=0" in _blk.group(1),
+              "45: A %s borderwidth=0(去边框)" % _sty)
+        check(_blk is not None and "relief=tk.FLAT" in _blk.group(1),
+              "45: A %s relief=FLAT(无立体边)" % _sty)
+        check(_blk is not None and "relief=tk.SOLID" not in _blk.group(1),
+              "45: A %s 不再使用 SOLID 描边" % _sty)
+
+    # ============ B. 卡片与页面底色差必须可辨 ============
+    # 去边框后卡片边界完全依赖底色差。原 C_BG=#FAFAFA vs C_CARD_BG=#FFFFFF
+    # 对比度仅 ~1.03，肉眼几乎不可分，卡片会"消失"。
+    _MIN45 = 1.15
+    c_light = _contrast(_gtl45.C_BG, _gtl45.C_CARD_BG)
+    check(c_light >= _MIN45,
+          "45: B 浅色卡片/页面底对比度 %.3f >= %.2f" % (c_light, _MIN45))
+    c_dark = _contrast(_gtl45.C_DARK_BG, _gtl45.C_DARK_CARD_BG)
+    check(c_dark >= _MIN45,
+          "45: B 深色卡片/页面底对比度 %.3f >= %.2f" % (c_dark, _MIN45))
+    # 悬停态与常态卡片也需可区分（去边框后悬停只剩底色）
+    c_hover = _contrast(_gtl45.C_CARD_BG, _gtl45.C_CARD_HOVER)
+    check(c_hover >= 1.02,
+          "45: B 悬停底与常态卡片可区分(%.3f >= 1.02)" % c_hover)
+    # 选中底与常态卡片可区分
+    c_sel = _contrast(_gtl45.C_CARD_BG, _gtl45.C_BRAND_LIGHT)
+    check(c_sel >= 1.03,
+          "45: B 选中底与常态卡片可区分(%.3f >= 1.03)" % c_sel)
+
+    # ============ C. 去边框后选中指示不得丢失 ============
+    _set45 = inspect.getsource(_gtl45.TaskCard.set_selected)
+    check("relheight" in _set45,
+          "45: C 左侧主色竖条仍在(去边框后的唯一点选指示)")
+    check("CardSelected.TFrame" in _set45,
+          "45: C 选中态仍有专属底色")
+    # docstring 不得再声称"三通道"（第三通道已随去边框移除）
+    _doc45 = _set45.split('"""')[1] if '"""' in _set45 else ""
+    check("三通道" not in _doc45,
+          "45: C 文档不再声称已失效的'三通道'指示")
+    check("竖条" in _doc45,
+          "45: C 文档准确描述竖条为选中指示")
+
+    # ============ D. 间距：无边框后需更大呼吸位 ============
+    import gui_app as _app45
+    check(getattr(_gtl45, "CARD_PADX", None) is not None
+          and getattr(_gtl45, "CARD_PADY", None) is not None,
+          "45: D 卡片间距收敛为单一来源常量")
+    check(_gtl45.CARD_PADY >= 4,
+          "45: D 卡片纵向间距 %d >= 4(无边框需呼吸位)" % _gtl45.CARD_PADY)
+    check(_gtl45.CARD_PADX >= 4,
+          "45: D 卡片横向间距 %d >= 4" % _gtl45.CARD_PADX)
+    # 三处 pack 点必须都引用常量，避免各写各的导致间距不一致。
+    # 在模块级搜索：三处分别位于 _refresh_tasks 的两处与 _apply_search_filter，
+    # 只扫单个方法会漏。
+    _src_app45 = inspect.getsource(_app45)
+    _packs45 = re.findall(r"card\.pack\([^)]*padx=([^,)]+),\s*pady=([^)]+)\)",
+                          _src_app45)
+    check(len(_packs45) == 3,
+          "45: D 取得全部 3 处卡片 pack 点(实际 %d)" % len(_packs45))
+    check(all(a.strip() == "CARD_PADX" and b.strip() == "CARD_PADY"
+              for a, b in _packs45),
+          "45: D 三处 pack 均引用 CARD_PADX/CARD_PADY 常量(实际 %s)" % (_packs45,))
+
+    assert len(failures) == _fail_base, "test_45: 本节有断言失败"
+
+
+TESTS = [test_1, test_2, test_3_run_now, test_2b_D_mtime, test_3b, test_3c_interval_last_run, test_4, test_5_save, test_6_M4, test_7_2s, test_8_M10_baseline, test_9_L4, test_10_CLI_run_cli, test_11_S1_SE1, test_12_include, test_13_interval_next_run, test_14_run_now, test_15_daily, test_16_logger, test_17, test_18_config_baseline, test_19_GUI, test_20_utils_paths, test_21_utils_timeutil, test_22_scanner, test_23_config_Task, test_24_logger_close, test_25_GUI_mock, test_26_run_now_next_run, test_27_fail_count, test_28_mkdir_type_conflict, test_29_F4_interval, test_30_F5_daily, test_31_F6_baseline, test_32_C1_C2, test_33_tray_autostart, test_34_fast_FAT32, test_35_vs_skip, test_36_refactor_regress, test_37_ui_review_fixes, test_38_app_split_structure, test_39_from_dict_boundary, test_40_monthly, test_41_review_improvements, test_42_shortcut_dataloss, test_43_line_quality, test_44_card_layout, test_45_card_edge]
 
 if __name__ == "__main__":
     import traceback
