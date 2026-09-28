@@ -31,6 +31,7 @@ C_OK = "#26A69A"              # 成功对勾（同主色）
 C_BG = "#FAFAFA"              # 页面背景
 C_CARD_BG = "#FFFFFF"         # 卡片背景
 C_CARD_BG_ALT = "#F5F5F5"     # 卡片交替背景
+C_CARD_HOVER = "#F0F7F6"      # 卡片悬停底色（比选中态 C_BRAND_LIGHT 更淡）
 C_TEXT = "#212121"            # 主文字
 C_TEXT_MUTED = "#757575"      # 辅助文字（路径/调度信息）
 C_TEXT_DISABLED = "#BDBDBD"   # 禁用态文字
@@ -41,8 +42,23 @@ C_WHITE = "#FFFFFF"           # 白（品牌栏文字 / 输入框底）
 C_BRAND_SUB = "#E0F2F1"       # 品牌栏副标题文字（同 C_BRAND_LIGHT）
 C_LOG_ERROR = "#C62828"       # 日志 ERROR 级别（深红，比 C_DELETE 更醒目）
 C_LOG_WARN = "#E65100"        # 日志 WARN 级别（深橙）
+# 深色底上的日志级别色：浅色版的深红/深橙在暗背景上对比度不足，
+# 需提亮一档才能扫读（见 LayoutMixin._apply_theme）
+C_LOG_ERROR_LIGHT = "#FF8A80"
+C_LOG_WARN_LIGHT = "#FFB74D"
 C_DELETE_HOVER = "#FFEBEE"    # 危险按钮 hover 底色
 C_SWITCH_KNOB = "#D0D0D0"     # 开关滑块描边
+
+# ---------- 深色模式配色 ----------
+C_DARK_BG = "#1E1E1E"          # 深色页面背景
+C_DARK_CARD_BG = "#2D2D2D"     # 深色卡片背景
+C_DARK_CARD_BG_ALT = "#333333" # 深色卡片交替背景
+C_DARK_CARD_HOVER = "#383838"  # 深色卡片悬停底色
+C_DARK_TEXT = "#E0E0E0"        # 深色主文字
+C_DARK_TEXT_MUTED = "#A0A0A0"  # 深色辅助文字
+C_DARK_TEXT_DISABLED = "#606060" # 深色禁用态文字
+C_DARK_BORDER = "#404040"      # 深色分隔线
+C_DARK_BRAND_LIGHT = "#1A3A38" # 深色选中态底色
 
 # ---------- 工具：截断中间路径（保留首尾） ----------
 def _short_path(p, max_len=36):
@@ -133,7 +149,7 @@ class TaskCard(ttk.Frame):
         self._btn_frame.pack(anchor=tk.E, pady=(4, 0))
 
         self._run_btn = ttk.Button(
-            self._btn_frame, text="运行", width=6,
+            self._btn_frame, text="▶ 运行", width=6,
             style="Accent.TButton", command=self._on_run)
         self._run_btn.pack(side=tk.LEFT, padx=(0, 4))
 
@@ -172,6 +188,91 @@ class TaskCard(ttk.Frame):
         self._selected = False
         self.bind("<Configure>", self._on_configure)
 
+        # ---- 悬停高亮（视觉质感）：非选中态悬停显极淡主色底 ----
+        # Enter/Leave 在子部件间移动会成对触发，用防抖 after 合并，
+        # 避免高频重绘抖动；选中态不参与（保留选中底色）
+        self._hover = False
+        self._hover_after = None  # type: Optional[str]
+        self._hover_widgets = (self, info, name_row, self._name_lbl,
+                               self._mode_lbl, self._path_lbl, self._sched_lbl,
+                               self._sched_sep, right, self._next_lbl,
+                               self._btn_frame, self._status_lbl)
+        for w in self._hover_widgets:
+            try:
+                w.bind("<Enter>", self._on_hover_enter)
+                w.bind("<Leave>", self._on_hover_leave)
+            except tk.TclError:
+                pass
+        # bg 重绘仅针对 tk.Label（ttk 部件底色由 CardHover.TFrame 样式统一控制，
+        # 对 ttk.Frame 逐个 configure(bg=) 是无效选项）
+        self._hover_labels = (self._name_lbl, self._mode_lbl, self._path_lbl,
+                              self._sched_lbl, self._sched_sep, self._next_lbl,
+                              self._status_lbl)
+
+        # ---- 选中指示条：左侧 4px 主色竖条（place 悬浮，不参与 pack 布局） ----
+        self._sel_bar = tk.Label(self, bg=C_BRAND, width=3, height=200)
+
+    # ---- 悬停高亮 ----
+    def _on_hover_enter(self, _evt=None):
+        # type: (object) -> None
+        self._hover = True
+        if self._hover_after is not None:
+            return
+        # 40ms 防抖：极短延迟内 Leave 会撤销，未撤销才真正重绘
+        self._hover_after = self.after(40, self._apply_hover)
+
+    def _on_hover_leave(self, _evt=None):
+        # type: (object) -> None
+        self._hover = False
+        if self._hover_after is not None:
+            # 悬停尚未生效即离开：撤销待执行的重绘即可
+            try:
+                self.after_cancel(self._hover_after)
+            except Exception:
+                pass
+            self._hover_after = None
+            return
+        if self._selected:
+            return
+        # 悬停已生效后离开：恢复白底
+        try:
+            self.configure(style="Card.TFrame")
+            for w in self._hover_labels:
+                try:
+                    w.configure(bg=C_CARD_BG)
+                except tk.TclError:
+                    pass
+            self._sw_canvas.configure(bg=C_CARD_BG)
+        except tk.TclError:
+            pass
+
+    def _apply_hover(self):
+        # type: () -> None
+        self._hover_after = None
+        if self._selected or not self._hover:
+            return
+        try:
+            self.configure(style="CardHover.TFrame")
+            for w in self._hover_labels:
+                try:
+                    w.configure(bg=C_CARD_HOVER)
+                except tk.TclError:
+                    pass
+            self._sw_canvas.configure(bg=C_CARD_HOVER)
+        except tk.TclError:
+            pass
+
+    def _cancel_hover(self):
+        # type: () -> None
+        """撤销未触发的悬停重绘（选中/取消选中时调用）。"""
+        if self._hover_after is not None:
+            try:
+                self.after_cancel(self._hover_after)
+            except Exception:
+                pass
+            self._hover_after = None
+        self._hover = False
+
     # ---- 事件回调（委托给 App） ----
     def _on_run(self):
         self._app._run_card_task(self._id)
@@ -192,7 +293,11 @@ class TaskCard(ttk.Frame):
             pass
 
     def _on_click(self, _evt=None):
-        self._app._select_card(self._id)
+        add = False
+        if _evt is not None:
+            state = getattr(_evt, "state", 0)
+            add = bool(state & 0x0004)
+        self._app._select_card(self._id, add=add)
 
     def _on_dblclick(self, _evt=None):
         self._app._select_card(self._id)
@@ -203,16 +308,36 @@ class TaskCard(ttk.Frame):
         pass
 
     # ---- 渲染：刷新内容 ----
+    def _card_bg(self):
+        # type: () -> str
+        return C_DARK_CARD_BG if getattr(self._app, "_dark_mode", False) else C_CARD_BG
+
+    def _text_color(self):
+        # type: () -> str
+        return C_DARK_TEXT if getattr(self._app, "_dark_mode", False) else C_TEXT
+
+    def _text_muted_color(self):
+        # type: () -> str
+        return C_DARK_TEXT_MUTED if getattr(self._app, "_dark_mode", False) else C_TEXT_MUTED
+
+    def _text_disabled_color(self):
+        # type: () -> str
+        return C_DARK_TEXT_DISABLED if getattr(self._app, "_dark_mode", False) else C_TEXT_DISABLED
+
     def refresh(self, task):
         # type: (Task) -> None
         """按 Task 快照刷新卡片显示。"""
+        card_bg = self._card_bg()
+        text_c = self._text_color()
+        muted_c = self._text_muted_color()
+        dis_c = self._text_disabled_color()
         running = self._app.scheduler.is_task_running(task.id)
-        self._name_lbl.config(text=task.name)
-        self._mode_lbl.config(text=_MODE_LABEL.get(task.mode, task.mode))
+        self._name_lbl.config(text=task.name, fg=text_c, bg=card_bg)
+        self._mode_lbl.config(text=_MODE_LABEL.get(task.mode, task.mode), bg=card_bg)
         self._path_lbl.config(
-            text="%s → %s" % (_short_path(task.source), _short_path(task.target)))
+            text="%s → %s" % (_short_path(task.source), _short_path(task.target)),
+            bg=card_bg)
 
-        # 调度描述
         if task.schedule.enabled and task.enabled:
             stype = task.schedule.type
             if stype == "interval":
@@ -227,49 +352,43 @@ class TaskCard(ttk.Frame):
             else:
                 sched_txt = "未安排定时"
             last_txt = "上次: %s" % (format_epoch(task.last_run) or "-")
-            self._sched_lbl.config(text="%s · %s" % (sched_txt, last_txt))
+            self._sched_lbl.config(text="%s · %s" % (sched_txt, last_txt), bg=card_bg)
         else:
             self._sched_lbl.config(
-                text="未启用" if not task.enabled else "未安排定时")
+                text="未启用" if not task.enabled else "未安排定时", bg=card_bg)
 
-        # 下次运行
         if task.schedule.enabled and task.enabled and task.next_run:
             self._next_lbl.config(text="下次: %s" % format_epoch(task.next_run),
-                                  fg=C_TEXT_MUTED)
+                                  fg=muted_c, bg=card_bg)
         else:
-            self._next_lbl.config(text="", fg=C_TEXT_DISABLED)
+            self._next_lbl.config(text="", fg=dis_c, bg=card_bg)
 
-        # 状态标记
-        # P0-4 修复：从未运行（无 last_run）显示"未运行"，不再误报"✓成功"
         if running:
-            self._status_lbl.config(text="● 运行中", fg=C_BRAND)
+            self._status_lbl.config(text="● 运行中", fg=C_BRAND, bg=card_bg)
         elif not task.enabled:
-            self._status_lbl.config(text="● 已禁用", fg=C_TEXT_DISABLED)
+            self._status_lbl.config(text="● 已禁用", fg=dis_c, bg=card_bg)
         elif not task.last_run:
-            self._status_lbl.config(text="● 未运行", fg=C_TEXT_DISABLED)
+            self._status_lbl.config(text="● 未运行", fg=dis_c, bg=card_bg)
         elif task.last_status in ("成功", None):
-            self._status_lbl.config(text="● 成功", fg=C_OK)
+            self._status_lbl.config(text="● 成功", fg=C_OK, bg=card_bg)
         elif task.last_status in ("部分失败", "已取消"):
-            self._status_lbl.config(text="● %s" % task.last_status, fg=C_WARN)
+            self._status_lbl.config(text="● %s" % task.last_status, fg=C_WARN, bg=card_bg)
         else:
             self._status_lbl.config(text="● %s" % (task.last_status or "失败"),
-                                    fg=C_DELETE)
+                                    fg=C_DELETE, bg=card_bg)
 
-        # P1: 运行中禁用"运行"按钮（视觉反馈，避免点击后只弹提示）
         self._run_btn.config(state=tk.DISABLED if running else tk.NORMAL)
 
-        # 开关绘制
         self._draw_switch(task.enabled)
 
-        # 禁用态文字
         if not task.enabled:
-            self._name_lbl.config(fg=C_TEXT_DISABLED)
-            self._path_lbl.config(fg=C_TEXT_DISABLED)
-            self._sched_lbl.config(fg=C_TEXT_DISABLED)
+            self._name_lbl.config(fg=dis_c)
+            self._path_lbl.config(fg=dis_c)
+            self._sched_lbl.config(fg=dis_c)
         else:
-            self._name_lbl.config(fg=C_TEXT)
-            self._path_lbl.config(fg=C_TEXT_MUTED)
-            self._sched_lbl.config(fg=C_TEXT_MUTED)
+            self._name_lbl.config(fg=text_c)
+            self._path_lbl.config(fg=muted_c)
+            self._sched_lbl.config(fg=muted_c)
 
     def _draw_switch(self, on):
         # type: (bool) -> None
@@ -298,23 +417,35 @@ class TaskCard(ttk.Frame):
 
     def set_selected(self, sel):
         # type: (bool) -> None
-        """选中态：淡青绿色底 + 1px 主色边框。"""
+        """选中态：淡青绿底 + 1px 主色边框 + 左侧主色竖条（三通道指示）。"""
         self._selected = sel
+        self._cancel_hover()
+        dark = getattr(self._app, "_dark_mode", False)
+        brand_light = C_DARK_BRAND_LIGHT if dark else C_BRAND_LIGHT
+        card_bg = C_DARK_CARD_BG if dark else C_CARD_BG
         if sel:
             self.configure(style="CardSelected.TFrame")
             for w in (self._name_lbl, self._mode_lbl, self._path_lbl,
                       self._sched_lbl, self._next_lbl, self._status_lbl,
                       self._sw_canvas):
                 try:
-                    w.configure(bg=C_BRAND_LIGHT)
+                    w.configure(bg=brand_light)
                 except tk.TclError:
                     pass
+            try:
+                self._sel_bar.place(x=0, y=0, height=200, width=4)
+            except tk.TclError:
+                pass
         else:
             self.configure(style="Card.TFrame")
             for w in (self._name_lbl, self._mode_lbl, self._path_lbl,
                       self._sched_lbl, self._next_lbl, self._status_lbl,
                       self._sw_canvas):
                 try:
-                    w.configure(bg=C_CARD_BG)
+                    w.configure(bg=card_bg)
                 except tk.TclError:
                     pass
+            try:
+                self._sel_bar.place_forget()
+            except tk.TclError:
+                pass

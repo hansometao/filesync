@@ -15,6 +15,7 @@
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -2925,7 +2926,217 @@ def test_41_review_improvements():
     assert len(failures) == _fail_base, "test_41_review_improvements: 本节有断言失败"
 
 
-TESTS = [test_1, test_2, test_3_run_now, test_2b_D_mtime, test_3b, test_3c_interval_last_run, test_4, test_5_save, test_6_M4, test_7_2s, test_8_M10_baseline, test_9_L4, test_10_CLI_run_cli, test_11_S1_SE1, test_12_include, test_13_interval_next_run, test_14_run_now, test_15_daily, test_16_logger, test_17, test_18_config_baseline, test_19_GUI, test_20_utils_paths, test_21_utils_timeutil, test_22_scanner, test_23_config_Task, test_24_logger_close, test_25_GUI_mock, test_26_run_now_next_run, test_27_fail_count, test_28_mkdir_type_conflict, test_29_F4_interval, test_30_F5_daily, test_31_F6_baseline, test_32_C1_C2, test_33_tray_autostart, test_34_fast_FAT32, test_35_vs_skip, test_36_refactor_regress, test_37_ui_review_fixes, test_38_app_split_structure, test_39_from_dict_boundary, test_40_monthly, test_41_review_improvements]
+def test_42_shortcut_dataloss():
+    # type: () -> None
+    """自测节 42. 快捷键穿透/悬空选中/文案一致（UI 优化引入的回归修复）"""
+    _fail_base = len(failures)
+    print("[42] 快捷键穿透 + 悬空选中 + 文案一致性")
+    import inspect
+
+    _tk42 = sys.modules.get("tkinter")
+    if _tk42 is not None and not hasattr(_tk42, "scrolledtext"):
+        import types as _types42
+        _st42 = _types42.ModuleType("tkinter.scrolledtext")
+        _st42.ScrolledText = type("ScrolledText", (object,),
+                                  {"__init__": lambda self, *a, **k: None})
+        _tk42.scrolledtext = _st42
+        sys.modules["tkinter.scrolledtext"] = _st42
+    import gui_app as _app42
+    App42 = _app42.App
+
+    # ---- B1: 焦点在文本输入控件时，快捷键必须让路 ----
+    class _FocusEntry(object):
+        pass
+    _FocusEntry.__name__ = "Entry"
+    check(getattr(App42, "_in_text_input", None) is not None,
+          "42: B1 存在 _in_text_input 焦点守卫")
+
+    class _FocusBtn(object):
+        pass
+    _FocusBtn.__name__ = "Button"
+
+    class _FocusRoot(object):
+        def __init__(self, w):
+            self._w = w
+        def focus_get(self):
+            return self._w
+
+    class _Var42(object):
+        def __init__(self, v):
+            self._v = v
+        def get(self):
+            return self._v
+
+    probe = App42.__new__(App42)  # 绕过 __init__，仅测纯逻辑
+    probe.root = _FocusRoot(_FocusEntry())
+    check(App42._in_text_input(probe) is True,
+          "42: B1 焦点在 Entry -> 判定为文本输入(快捷键须让路)")
+    probe.root = _FocusRoot(_FocusBtn())
+    check(App42._in_text_input(probe) is False,
+          "42: B1 焦点在 Button -> 非文本输入(快捷键正常生效)")
+    probe.root = _FocusRoot(None)
+    check(App42._in_text_input(probe) is False,
+          "42: B1 无焦点 -> 非文本输入")
+
+    # 五个快捷键处理器必须都经守卫
+    for _fn_name in ("_on_shortcut_run", "_focus_search", "_on_shortcut_delete",
+                     "_on_shortcut_add", "_on_shortcut_dark"):
+        _fn = getattr(App42, _fn_name, None)
+        if _fn is None:
+            check(False, "42: B1 存在快捷键处理器 %s" % _fn_name)
+            continue
+        check("_in_text_input" in inspect.getsource(_fn),
+              "42: B1 %s 内含 _in_text_input 焦点守卫" % _fn_name)
+
+    # 方向键同根因：输入控件内按上下键不应移动卡片选中
+    check("_in_text_input" in inspect.getsource(App42._on_arrow),
+          "42: B1 _on_arrow 含焦点守卫(输入框内不跳卡片)")
+
+    # ---- B2: 卡片消失时同步清理选中集合（消除悬空 id）----
+    check(getattr(App42, "_prune_selection", None) is not None,
+          "42: B2 存在 _prune_selection 悬空选中清理")
+    probe._selected_ids = {"a", "b", "ghost"}
+    probe._selected_id = "ghost"
+    App42._prune_selection(probe, {"a", "b"})
+    check(probe._selected_ids == {"a", "b"},
+          "42: B2 悬空 id 从 _selected_ids 移除")
+    check(probe._selected_id == "a",
+          "42: B2 _selected_id 悬空时回退到任一有效选中")
+
+    # 全部选中皆悬空 -> 退化为无选中，不留悬空指针
+    probe._selected_ids = {"x", "y"}
+    probe._selected_id = "x"
+    App42._prune_selection(probe, set())
+    check(probe._selected_ids == set() and probe._selected_id is None,
+          "42: B2 全部悬空 -> 选中清空且 _selected_id 为 None")
+
+    # ---- B3: 悬空 id 走 _on_delete 不得 IndexError ----
+    class _Store42(object):
+        def get(self, tid):
+            return None          # 任务已不存在
+        def remove(self, tid):
+            raise AssertionError("不应 remove 悬空 id")
+    class _Sched42(object):
+        def acquire(self, tid):
+            return True
+        def release(self, tid):
+            pass
+    probe._selected_ids = {"ghost"}
+    probe._selected_id = "ghost"
+    probe.store = _Store42()
+    probe.scheduler = _Sched42()
+    probe._task_rows = {}
+    probe._refresh_tasks = lambda full=False: None
+    try:
+        App42._on_delete(probe)
+        check(True, "42: B3 悬空 id 删除不抛 IndexError")
+    except IndexError as e:
+        check(False, "42: B3 悬空 id 删除不得 IndexError: %s" % e)
+    except Exception as e:
+        check(False, "42: B3 悬空 id 删除异常: %s" % e)
+
+    # ---- B4: 空态文案与实际按钮文案一致（单一来源）----
+    import gui_layout as _gl42
+    check(getattr(_gl42, "BTN_ADD_TEXT", None) is not None,
+          "42: B4 按钮文案收敛为单一来源常量")
+    _src_empty = inspect.getsource(App42._show_empty_state)
+    check("BTN_ADD_TEXT" in _src_empty,
+          "42: B4 空态文案引用 BTN_ADD_TEXT(不硬编码 '+')")
+    _src_toolbar = inspect.getsource(_gl42.LayoutMixin._setup_layout)
+    check("BTN_ADD_TEXT" in _src_toolbar,
+          "42: B4 工具栏按钮引用同一 BTN_ADD_TEXT")
+
+    # ---- B5: 重建/重排不得绕过搜索+筛选过滤 ----
+    check(getattr(App42, "_current_search_kw", None) is not None,
+          "42: B5 存在 _current_search_kw 读取当前有效关键词")
+    _src_refresh = inspect.getsource(App42._refresh_tasks)
+    check("_apply_search_filter" in _src_refresh,
+          "42: B5 _refresh_tasks 重建/重排后重应用过滤")
+    # 增量重排块不得自行 pack 卡片（可见性只能由过滤决定）
+    _inc = _src_refresh.split("membership_changed:")[-1]
+    _inc = _inc.split("if not tasks:")[0]
+    check(".pack(fill=tk.X" not in _inc,
+          "42: B5 增量重排不自行 pack(否则绕过过滤重现隐藏卡片)")
+
+    # _current_search_kw：占位态 -> 空串；有效输入 -> 原样
+    probe._search_var = _Var42("搜索名称/路径…")
+    probe._search_placeholder = "搜索名称/路径…"
+    check(App42._current_search_kw(probe) == "",
+          "42: B5 占位提示不计入关键词")
+    probe._search_var = _Var42("  备份  ")
+    check(App42._current_search_kw(probe) == "备份",
+          "42: B5 有效关键词去空白后返回")
+
+    # ---- B6: 深色模式补全——布局层部件必须随主题重配 ----
+    check(hasattr(_gl42, "_THEME_BG") and hasattr(_gl42, "_THEME_FG"),
+          "42: B6 存在深浅两套主题色表 _THEME_BG/_THEME_FG")
+    _bg, _fg = _gl42._THEME_BG, _gl42._THEME_FG
+    check(set(_bg[False].keys()) == set(_bg[True].keys()),
+          "42: B6 深浅背景角色集一致(防漏配深色)")
+    check(set(_fg[False].keys()) == set(_fg[True].keys()),
+          "42: B6 深浅前景角色集一致(防漏配深色)")
+    check(_bg[False]["page"] != _bg[True]["page"],
+          "42: B6 page 底色深浅确有差异(切换真的生效)")
+    check(_fg[False]["text"] != _fg[True]["text"],
+          "42: B6 text 字色深浅确有差异")
+    check(getattr(_gl42.LayoutMixin, "_reg_themed", None) is not None,
+          "42: B6 存在 _reg_themed 部件登记")
+    check(getattr(_gl42.LayoutMixin, "_apply_theme", None) is not None,
+          "42: B6 存在 _apply_theme 遍历重配")
+    # 布局层必须接入登记，否则 24 处硬编码底色仍是半残
+    _src_layout42 = inspect.getsource(_gl42.LayoutMixin._setup_layout)
+    check("_reg_themed" in _src_layout42,
+          "42: B6 _setup_layout 接入部件登记(布局层不再硬编码)")
+    # 角色重配行为：假 widget 记录 configure 调用
+    class _W42(object):
+        def __init__(self):
+            self.calls = []  # type: List[Any]
+        def configure(self, **kw):
+            self.calls.append(kw)
+        def config(self, **kw):
+            self.calls.append(kw)
+    w_page, w_card, w_txt = _W42(), _W42(), _W42()
+    probe._themed = [(w_page, "page", None), (w_card, "card", None),
+                     (w_txt, "card", "muted")]
+    probe._dark_mode = True
+    _gl42.LayoutMixin._apply_theme(probe)
+    check(w_page.calls and w_page.calls[-1].get("bg") == _bg[True]["page"],
+          "42: B6 深色下 page 部件被重配为深底")
+    check(w_card.calls and w_card.calls[-1].get("bg") == _bg[True]["card"],
+          "42: B6 深色下 card 部件被重配为深底")
+    check(w_txt.calls and w_txt.calls[-1].get("fg") == _fg[True]["muted"],
+          "42: B6 深色下 Label 字色被重配为深色前景")
+    n_dark = len(w_txt.calls)
+    probe._dark_mode = False
+    _gl42.LayoutMixin._apply_theme(probe)
+    check(w_page.calls[-1].get("bg") == _bg[False]["page"]
+          and w_txt.calls[-1].get("fg") == _fg[False]["muted"],
+          "42: B6 切回浅色同样重配(双向可逆)")
+
+    # 覆盖率：布局层每个硬编码底色的 tk 部件都必须登记，
+    # 否则新增控件会静默漏掉主题（深色模式半残的根因）
+    _lines42 = inspect.getsource(_gl42.LayoutMixin._setup_layout).splitlines()
+    _missed42 = []
+    for _i, _l in enumerate(_lines42):
+        if not re.search(r"bg=C_(BG|CARD_BG)\b", "\n".join(_lines42[_i:_i + 3])):
+            continue
+        if not re.search(r"tk\.(Frame|Canvas|PanedWindow|Label)|_w\s*=\s*tk\.Label",
+                         _l):
+            continue
+        _win = "\n".join(_lines42[_i:_i + 8])
+        if "_reg_themed" in _win:
+            continue
+        # log_text 由 _apply_theme 成组处理（底色+字色+级别色），豁免
+        if "log_text" in _l or "ScrolledText" in _win:
+            continue
+        _missed42.append("L%d %s" % (_i, _l.strip()[:60]))
+    check(not _missed42,
+          "42: B6 布局层 themed 部件全部登记(漏: %s)" % ("; ".join(_missed42) or "-"))
+
+    assert len(failures) == _fail_base, "test_42: 本节有断言失败"
+
+
+TESTS = [test_1, test_2, test_3_run_now, test_2b_D_mtime, test_3b, test_3c_interval_last_run, test_4, test_5_save, test_6_M4, test_7_2s, test_8_M10_baseline, test_9_L4, test_10_CLI_run_cli, test_11_S1_SE1, test_12_include, test_13_interval_next_run, test_14_run_now, test_15_daily, test_16_logger, test_17, test_18_config_baseline, test_19_GUI, test_20_utils_paths, test_21_utils_timeutil, test_22_scanner, test_23_config_Task, test_24_logger_close, test_25_GUI_mock, test_26_run_now_next_run, test_27_fail_count, test_28_mkdir_type_conflict, test_29_F4_interval, test_30_F5_daily, test_31_F6_baseline, test_32_C1_C2, test_33_tray_autostart, test_34_fast_FAT32, test_35_vs_skip, test_36_refactor_regress, test_37_ui_review_fixes, test_38_app_split_structure, test_39_from_dict_boundary, test_40_monthly, test_41_review_improvements, test_42_shortcut_dataloss]
 
 if __name__ == "__main__":
     import traceback

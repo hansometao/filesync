@@ -116,14 +116,12 @@ class SyncFlowMixin(object):
         if task is None:
             messagebox.showinfo("提示", "请先选择要同步的任务")
             return
-        # README 承诺：禁用任务不参与定时，也不手动同步
         if not task.enabled:
             messagebox.showinfo("提示", "该任务已禁用，请先在编辑中启用后再同步")
             return
         if self._manual_busy:
             messagebox.showinfo("提示", "已有手动同步正在进行，请等待完成")
             return
-        # 从预览开始就占用运行槽：预览期间调度器不会并发触发，预览/执行一致
         if not self.scheduler.acquire(task.id):
             messagebox.showinfo("提示", "该任务正在运行中，请稍候")
             return
@@ -133,12 +131,9 @@ class SyncFlowMixin(object):
             self._prog_count = 0
             self._last_prog_ts = 0.0
             self._show_wait("正在扫描并对比差异...", cancellable=True)
-            # 线程启动失败（资源耗尽等）同样必须回滚运行槽与门闩，
-            # 否则任务永久"运行中"且手动同步门闩锁死
             if not self._start_worker(self._diff_worker, (task,)):
                 raise RuntimeError("同步线程启动失败")
         except Exception as e:
-            # 等待窗创建失败/线程启动失败时必须释放运行槽与门闩，否则任务永久"运行中"
             self.logger.error("启动手动同步失败: %s" % e)
             try:
                 self._hide_wait()
