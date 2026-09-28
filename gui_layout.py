@@ -50,14 +50,19 @@ BTN_ADD_TEXT = "+ 添加任务"
 # 语义角色，_apply_theme 按当前 _dark_mode 遍历重配。
 # 角色集在深浅两套中必须一致——只加浅色键会让该部件在深色下 KeyError。
 _THEME_BG = {
-    False: {"page": C_BG, "card": C_CARD_BG},
-    True: {"page": C_DARK_BG, "card": C_DARK_CARD_BG},
+    False: {"page": C_BG, "card": C_CARD_BG, "border": C_BORDER},
+    True: {"page": C_DARK_BG, "card": C_DARK_CARD_BG, "border": C_DARK_BORDER},
 }
 _THEME_FG = {
     False: {"text": C_TEXT, "muted": C_TEXT_MUTED, "disabled": C_TEXT_DISABLED},
     True: {"text": C_DARK_TEXT, "muted": C_DARK_TEXT_MUTED,
            "disabled": C_DARK_TEXT_DISABLED},
 }
+
+# Tooltip 配色：原先硬编码 #FFFFCC 亮黄，深色模式下弹出极为突兀。
+# 用中性深色描边 + 与卡片同族的白/暗底，两种主题下都协调。
+C_TIP_BG = "#37474F"
+C_TIP_FG = "#ECEFF1"
 
 
 class LayoutMixin(object):
@@ -144,9 +149,16 @@ class LayoutMixin(object):
         _search_frame = tk.Frame(toolbar, bg=C_BG)
         _search_frame.pack(side=tk.LEFT, padx=(12, 0))
         self._reg_themed(_search_frame, "page")
+        # 经典 tk 部件（Entry/Text）没有 -lightcolor/-darkcolor 选项，
+        # relief=SOLID+bd=1 画出的 1px 斜角固定取系统 System3D 色，既不是
+        # C_BORDER 也无法随深色模式重配。改用 bd=0 去掉该边，再以
+        # highlight 画 1px 描边：非聚焦取 highlightbackground（边框色），
+        # 聚焦自动切 highlightcolor（主色），既可主题化又保留聚焦反馈。
         self._search_entry = tk.Entry(
             _search_frame, textvariable=self._search_var,
-            font=("", 9), width=20, relief=tk.SOLID, bd=1,
+            font=("", 9), width=20, bd=0, relief=tk.FLAT,
+            highlightthickness=1, highlightbackground=C_BORDER,
+            highlightcolor=C_BRAND,
             bg=C_CARD_BG, fg=C_TEXT, insertbackground=C_TEXT)
         self._search_entry.pack(side=tk.LEFT)
         # 光标色（insertbackground）随 fg 走，否则深色下是黑线看不见
@@ -195,11 +207,13 @@ class LayoutMixin(object):
         Tooltip(self._sched_btn, "启动/停止定时调度器")
 
         # ---- 3. 卡片式任务列表 + 日志面板（PanedWindow 可拖拽分隔）----
+        # sash 填充色取 PanedWindow 自身的 -bg：若与 pane 同底色，4px 分隔条
+        # 完全不可见（只在鼠标移上去变双箭头时才暴露"这里有根看不见的杆"）。
+        # 故用 border 色作 sash 底，并改由 _apply_theme 随主题重配。
         self._pane = tk.PanedWindow(
-            self.root, orient=tk.VERTICAL, bg=C_BG,
-            sashwidth=4, sashrelief=tk.FLAT, borderwidth=0)
+            self.root, orient=tk.VERTICAL, bg=C_BORDER,
+            sashwidth=4, sashrelief=tk.SOLID, borderwidth=0)
         self._pane.pack(fill=tk.BOTH, expand=True, padx=14, pady=4)
-        self._reg_themed(self._pane, "page")
 
         # 上半区：卡片列表
         list_outer = tk.Frame(self._pane, bg=C_BG)
@@ -297,8 +311,9 @@ class LayoutMixin(object):
         self.log_text = scrolledtext.ScrolledText(
             self._log_body, height=5, state=tk.DISABLED,
             font=("Consolas", 9), bg=C_CARD_BG, fg=C_TEXT,
-            relief=tk.SOLID, bd=1, highlightthickness=0,
-            borderwidth=1, insertbackground=C_TEXT)
+            bd=0, relief=tk.FLAT, highlightthickness=1,
+            highlightbackground=C_BORDER, highlightcolor=C_BRAND,
+            insertbackground=C_TEXT, padx=4, pady=2)
         self.log_text.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
         # log_text 不入 _themed：其底色/字色/级别色需成组重配，
         # 由 _apply_theme 单独处理（含 tag 提亮）
@@ -410,13 +425,23 @@ class LayoutMixin(object):
                     w.configure(fg=_THEME_FG[dark][fg_role])
             except tk.TclError:
                 pass
-        # 日志级别色在深底上须用亮色，否则 C_LOG_ERROR 深红几乎不可读
+        # PanedWindow 不在登记表内：它的 bg 是 sash 填充色而非页面底色，
+        # 混入 page 角色会让 4px 分隔条重新变得不可见
+        pane = getattr(self, "_pane", None)
+        if pane is not None:
+            try:
+                pane.configure(bg=_THEME_BG[dark]["border"])
+            except tk.TclError:
+                pass
+        # 日志级别色在深底上须用亮色，否则 C_LOG_ERROR 深红几乎不可读；
+        # 其 1px 描边同样来自 highlightbackground（bd=0 后已无系统 3D 边）
         log_text = getattr(self, "log_text", None)
         if log_text is not None:
             try:
                 log_text.configure(
                     bg=_THEME_BG[dark]["card"],
                     fg=_THEME_FG[dark]["text"],
+                    highlightbackground=_THEME_BG[dark]["border"],
                     insertbackground=_THEME_FG[dark]["text"])
                 log_text.tag_configure(
                     "error", foreground=(C_LOG_ERROR_LIGHT if dark else C_LOG_ERROR))
@@ -424,11 +449,19 @@ class LayoutMixin(object):
                     "warn", foreground=(C_LOG_WARN_LIGHT if dark else C_LOG_WARN))
             except tk.TclError:
                 pass
-
+        # 搜索框描边与光标色：bd=0 后其边框完全由 highlightbackground 决定
+        entry = getattr(self, "_search_entry", None)
+        if entry is not None:
+            try:
+                entry.configure(
+                    highlightbackground=_THEME_BG[dark]["border"],
+                    highlightcolor=C_BRAND,
+                    insertbackground=_THEME_FG[dark]["text"])
+            except tk.TclError:
+                pass
         # 占位提示态须保持"禁用色"语义：entry 登记的是正常 text 色，
         # 直接重配会让提示文字与真实输入同色，用户分不清框内是提示还是
         # 自己打的字
-        entry = getattr(self, "_search_entry", None)
         ph = getattr(self, "_search_placeholder", None)
         if entry is not None and ph is not None:
             try:
@@ -492,13 +525,21 @@ class LayoutMixin(object):
         # F_BRAND   = ("", 14, "bold") # 品牌名
 
         # ---------- 卡片容器 ----------
+        # relief=tk.SOLID 只在下/右侧显色，不显 lightcolor/darkcolor 时边框
+        # 呈"半边框"（左/上无色）的不对称细线；且默认取 clam 主题的 XFCE 暖灰
+        # （#eeebe7/#cfcdc8）——clam 恒存在故恒被选中，与本项目中性灰不搭，
+        # 切深色模式后更会给 #2D2D2D 卡片描一圈亮暖白边。显式指定
+        # lightcolor=darkcolor=border 得到对称 1px 细边，且随主题切换。
         style.configure("Card.TFrame", background=card_bg,
-                        relief=tk.SOLID, borderwidth=1)
+                        relief=tk.SOLID, borderwidth=1,
+                        lightcolor=border, darkcolor=border)
         style.configure("CardSelected.TFrame", background=brand_light,
-                        relief=tk.SOLID, borderwidth=1)
+                        relief=tk.SOLID, borderwidth=1,
+                        lightcolor=border, darkcolor=border)
         # 悬停态：比选中更淡的主色底（TaskCard 悬停联动用）
         style.configure("CardHover.TFrame", background=card_hover,
-                        relief=tk.SOLID, borderwidth=1)
+                        relief=tk.SOLID, borderwidth=1,
+                        lightcolor=border, darkcolor=border)
         style.configure("CardHost.TFrame", background=bg)
 
         # ---------- TButton（全局默认） ----------
@@ -516,9 +557,11 @@ class LayoutMixin(object):
                   foreground=[("disabled", C_WHITE)])
 
         # Outline：白底描边按钮（编辑 / 运行全部 / 调度开关）
+        # 描边按钮在卡片上每张 3 个，是全窗口出现频次最高的"线"，同样需对称配色
         style.configure("Outline.TButton", font=("", 9),
                         background=card_bg, foreground=text,
-                        relief=tk.SOLID, borderwidth=1, padding=(12, 5))
+                        relief=tk.SOLID, borderwidth=1, padding=(12, 5),
+                        lightcolor=border, darkcolor=border)
         style.map("Outline.TButton",
                   background=[("active", card_bg_alt),
                               ("disabled", bg)],
@@ -527,7 +570,8 @@ class LayoutMixin(object):
         # Danger：删除按钮（红字白底）
         style.configure("Danger.TButton", font=("", 9),
                         background=card_bg, foreground=C_DELETE,
-                        relief=tk.SOLID, borderwidth=1, padding=(12, 5))
+                        relief=tk.SOLID, borderwidth=1, padding=(12, 5),
+                        lightcolor=border, darkcolor=border)
         style.map("Danger.TButton",
                   background=[("active", C_DELETE_HOVER)],
                   foreground=[("disabled", text_disabled)])
@@ -551,8 +595,15 @@ class LayoutMixin(object):
                         foreground=C_BRAND_SUB, background=C_BRAND)
 
         # ---------- TLabelframe（对话框分组） ----------
-        style.configure("TLabelframe", font=("", 9))
-        style.configure("TLabelframe.Label", font=("", 9, "bold"))
+        # clam 默认 relief=raised + borderwidth=2 + 暖灰 #dcdad5 底：2px 立体
+        # 斜角且底色不随主题变（深色模式下成一块浅灰立体方块）。用 GROOVE
+        # 1px 细边 + 显式 bordercolor/底色。
+        style.configure("TLabelframe", font=("", 9), background=bg,
+                        bordercolor=border, lightcolor=border,
+                        darkcolor=border, borderwidth=1,
+                        relief=tk.GROOVE)
+        style.configure("TLabelframe.Label", font=("", 9, "bold"),
+                        background=bg)
 
         # ---------- TNotebook（TaskDialog 选项卡） ----------
         style.configure("TNotebook", background=bg)
@@ -572,8 +623,11 @@ class LayoutMixin(object):
                   foreground=[("selected", text)])
 
         # ---------- TScrollbar ----------
+        # 不给 width 时 clam 令控件总宽恰等于 arrowsize（实测 14px），
+        # 叠加 borderwidth=0 后滑块成了两端贴死轨道的无边框窄条
         style.configure("Vertical.TScrollbar", background=border,
-                        troughcolor=bg, borderwidth=0, arrowsize=14)
+                        troughcolor=bg, borderwidth=0,
+                        arrowsize=12, width=16)
 
         # ---------- TCombobox / TEntry ----------
         style.configure("TCombobox", font=("", 9))
@@ -622,8 +676,12 @@ class Tooltip(object):
             tip = tk.Toplevel(self._widget)
             tip.wm_overrideredirect(True)
             tip.wm_geometry("+%d+%d" % (x, y))
+            # bd=0 + 1px highlight 描边（与搜索框/日志框同一套路）：
+            # relief=SOLID 的斜角边取系统 System3D 色，无法主题化
             tk.Label(tip, text=self._text, font=("", 8),
-                     bg="#FFFFCC", fg="#333333", relief=tk.SOLID, borderwidth=1,
+                     bg=C_TIP_BG, fg=C_TIP_FG,
+                     bd=0, relief=tk.FLAT, highlightthickness=1,
+                     highlightbackground=C_BORDER, highlightcolor=C_BRAND,
                      padx=6, pady=3).pack()
             self._tip = tip
         except tk.TclError:

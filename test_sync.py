@@ -3136,7 +3136,164 @@ def test_42_shortcut_dataloss():
     assert len(failures) == _fail_base, "test_42: 本节有断言失败"
 
 
-TESTS = [test_1, test_2, test_3_run_now, test_2b_D_mtime, test_3b, test_3c_interval_last_run, test_4, test_5_save, test_6_M4, test_7_2s, test_8_M10_baseline, test_9_L4, test_10_CLI_run_cli, test_11_S1_SE1, test_12_include, test_13_interval_next_run, test_14_run_now, test_15_daily, test_16_logger, test_17, test_18_config_baseline, test_19_GUI, test_20_utils_paths, test_21_utils_timeutil, test_22_scanner, test_23_config_Task, test_24_logger_close, test_25_GUI_mock, test_26_run_now_next_run, test_27_fail_count, test_28_mkdir_type_conflict, test_29_F4_interval, test_30_F5_daily, test_31_F6_baseline, test_32_C1_C2, test_33_tray_autostart, test_34_fast_FAT32, test_35_vs_skip, test_36_refactor_regress, test_37_ui_review_fixes, test_38_app_split_structure, test_39_from_dict_boundary, test_40_monthly, test_41_review_improvements, test_42_shortcut_dataloss]
+def test_43_line_quality():
+    # type: () -> None
+    """自测节 43. 线条质量：选中竖条贴合/对称细边框/开关不溢出/线条主题化"""
+    _fail_base = len(failures)
+    print("[43] 线条质量（竖条越界/半边框/开关溢出/线条主题化）")
+    import inspect
+
+    _tk43 = sys.modules.get("tkinter")
+    if _tk43 is not None and not hasattr(_tk43, "scrolledtext"):
+        import types as _types43
+        _st43 = _types43.ModuleType("tkinter.scrolledtext")
+        _st43.ScrolledText = type("ScrolledText", (object,),
+                                  {"__init__": lambda self, *a, **k: None})
+        _tk43.scrolledtext = _st43
+        sys.modules["tkinter.scrolledtext"] = _st43
+    import gui_tasklist as _gtl43
+    import gui_layout as _gl43
+
+    # ================= A. 选中竖条：贴合卡片全高、零硬编码 =================
+    _src_card = inspect.getsource(_gtl43.TaskCard.__init__)
+    # 只看代码行：注释里会引用 height=200 解释历史 bug，不该算作硬编码
+    _code_card = "\n".join(l.split("#")[0] for l in _src_card.splitlines())
+    check("height=200" not in _code_card,
+          "43: A 竖条构造无 height=200 硬编码(曾致 req_h 达 2804px)")
+    check("_sel_bar = tk.Frame(" in _src_card,
+          "43: A 竖条改用 tk.Frame(Label 的 width/height 会撑大 req_h)")
+
+    _src_set_sel = inspect.getsource(_gtl43.TaskCard.set_selected)
+    check("relheight" in _src_set_sel,
+          "43: A 竖条 place 用 relheight 跟随卡片高度")
+    # 负向后视排除 relheight（它含子串 "height"）；只看代码行避开注释
+    _code_set = "\n".join(l.split("#")[0] for l in _src_set_sel.splitlines())
+    check(re.search(r"place\([^)]*(?<!rel)height\s*=\s*\d", _code_set) is None,
+          "43: A 竖条 place 不再写死像素高度")
+
+    # ttk.Frame 的 padding 也是 place 的坐标系原点：padding 未下移时
+    # place(x=0)/relheight 都对不齐卡片左缘，故卡片本体须 padding=0
+    _super = re.search(r"super\(\)\.__init__\(([^)]*)\)", _src_card, re.S)
+    check(_super is not None and "padding=0" in _super.group(1),
+          "43: A 卡片本体 padding=0(否则 place 贴不到左缘)")
+    check("padding=(14, 10)" in _src_card,
+          "43: A padding 下移到内层 body(内容内缩量不变)")
+
+    # ================= B. 统一细边框 =================
+    _src_style = inspect.getsource(_gl43.LayoutMixin._setup_style)
+    for _sty in ("Card.TFrame", "CardSelected.TFrame", "CardHover.TFrame",
+                 "Outline.TButton", "Danger.TButton"):
+        _blk = re.search(
+            r'style\.configure\(\s*"%s"(.*?)\)\s*\n' % re.escape(_sty),
+            _src_style, re.S)
+        check(_blk is not None and "lightcolor" in _blk.group(1)
+              and "darkcolor" in _blk.group(1),
+              "43: B %s 显式 lightcolor/darkcolor(对称细边+主题化)" % _sty)
+    # 边框色必须来自主题变量 border（浅 C_BORDER / 深 C_DARK_BORDER）
+    check(re.search(r"lightcolor=border\b", _src_style) is not None,
+          "43: B 边框色取主题 border(深浅各自正确)")
+    # relief=SOLID 只在下/右侧显色，形成"半边框"；必须配对称 light/darkcolor
+    check("relief=tk.SOLID" in _src_style and "lightcolor" in _src_style,
+          "43: B SOLID 立体边已配对称色消除半边框")
+
+    # ================= C. 开关滑块不溢出轨道 =================
+    check(getattr(_gtl43, "_switch_radius", None) is not None,
+          "43: C 存在 _switch_radius 纯函数(半径按轨道高推导)")
+    _r = _gtl43._switch_radius(24)
+    track_h = 24 - 8                       # 轨道上下各留 2px
+    check(2 * _r <= track_h,
+          "43: C 滑块直径 %d 不溢出轨道高 %d" % (2 * _r, track_h))
+    check(_gtl43._switch_radius(24) < 24 // 2 - 2,
+          "43: C 半径小于按 Canvas 高直算的旧值 10(旧值致上下各溢出 2px)")
+    check(_gtl43._switch_radius(16) >= 1,
+          "43: C 小尺寸下半径仍为正(不会退化为 0)")
+    _src_draw = inspect.getsource(_gtl43.TaskCard._draw_switch)
+    check("_switch_radius" in _src_draw,
+          "43: C _draw_switch 使用按轨道高推导的半径")
+    check("ch // 2 - 2" not in _src_draw,
+          "43: C 旧的 ch//2-2 半径已移除")
+
+    # ================= D. 其余线条主题化 =================
+    _lf = re.search(r'style\.configure\(\s*"TLabelframe"(.*?)\)\s*\n',
+                    _src_style, re.S)
+    check(_lf is not None and "background=" in _lf.group(1),
+          "43: D TLabelframe 覆盖 clam 暖灰底(深色模式下不变会成浅灰方块)")
+    check(_lf is not None and "bordercolor" in _lf.group(1),
+          "43: D TLabelframe 显式 bordercolor(消掉 2px raised 斜角暖灰边)")
+    # 滚动条须给 width，否则实测总宽被压到恰等于 arrowsize
+    # 精确匹配 width=，排除 borderwidth/arrowsize 的子串误判
+    _sb = re.search(r'style\.configure\(\s*"Vertical.TScrollbar"(.*?)\)\s*\n',
+                    _src_style, re.S)
+    check(_sb is not None and re.search(r"(?<!border)(?<!arrow)width\s*=", _sb.group(1))
+          is not None,
+          "43: D 滚动条显式 width(否则总宽=arrowsize,滑块无边框贴死)")
+
+    # PanedWindow 的 sash 填充色取自身 bg：与 pane 同色则分隔条完全不可见
+    _src_pane = inspect.getsource(_gl43.LayoutMixin._setup_layout)
+    _pane_blk = re.search(r"tk\.PanedWindow\((.*?)\)\n", _src_pane, re.S)
+    check(_pane_blk is not None and "bg=C_BORDER" in _pane_blk.group(1),
+          "43: D PanedWindow 用 C_BORDER 作 sash 色(4px 分隔条可见)")
+    # pane 底色不再随 page 主题变，须由 _apply_theme 单独重配
+    check('_reg_themed(self._pane, "page")' not in _src_pane,
+          "43: D pane 移出主题登记表(否则 sash 色被 page 覆盖)")
+    _src_apply = inspect.getsource(_gl43.LayoutMixin._apply_theme)
+    check("_pane" in _src_apply,
+          "43: D _apply_theme 单独重配 pane 的 sash 色")
+    check("border" in _gl43._THEME_BG[True],
+          "43: D 主题色表新增 border 角色(供 sash/高亮边使用)")
+
+    # 经典 tk 部件无 lightcolor/darkcolor 选项，唯一可主题化的 1px 边是 highlight
+    _ent_blk = re.search(r"tk\.Entry\((.*?)\)\n", _src_pane, re.S)
+    check(_ent_blk is not None and "highlightbackground=" in _ent_blk.group(1),
+          "43: D 搜索框改用 highlightbackground 画可主题化的 1px 边")
+    check(_ent_blk is not None and re.search(r"\bbd=0", _ent_blk.group(1)) is not None,
+          "43: D 搜索框 bd=0(去掉不可主题化的系统 3D 斜角边)")
+    _txt_blk = re.search(r"scrolledtext\.ScrolledText\((.*?)\)\n", _src_pane, re.S)
+    check(_txt_blk is not None and "highlightbackground=" in _txt_blk.group(1),
+          "43: D 日志框改用 highlightbackground 画可主题化的 1px 边")
+    check(_txt_blk is not None and re.search(r"\bbd=0", _txt_blk.group(1)) is not None,
+          "43: D 日志框 bd=0(去掉不可主题化的系统 3D 斜角边)")
+    # Tooltip 不得硬编码配色
+    _src_tip = inspect.getsource(_gl43.Tooltip._show)
+    check("#FFFFCC" not in _src_tip,
+          "43: D Tooltip 不再硬编码 #FFFFCC 亮黄(深色模式下突兀)")
+    check(getattr(_gl43, "C_TIP_BG", None) is not None
+          and getattr(_gl43, "C_TIP_FG", None) is not None,
+          "43: D Tooltip 配色收敛为常量")
+
+    # ---- E. 卡片内部 ttk 容器须跟随卡片 style（否则选中/悬停呈斑驳） ----
+    check(getattr(_gtl43.TaskCard, "_set_card_style", None) is not None,
+          "43: E 存在 _set_card_style 统一切换卡片样式")
+    _src_init43 = inspect.getsource(_gtl43.TaskCard.__init__)
+    check("_card_frames" in _src_init43,
+          "43: E 登记卡片内全部 ttk 容器")
+    # 所有切换点必须走 _set_card_style，不能再有裸 self.configure(style=...)
+    for _fn43 in ("set_selected", "_apply_hover", "_on_hover_leave"):
+        _s43 = inspect.getsource(getattr(_gtl43.TaskCard, _fn43))
+        check('self.configure(style=' not in _s43,
+              "43: E %s 不裸改 self.style(须同步内部容器)" % _fn43)
+    _set_s43 = inspect.getsource(_gtl43.TaskCard._set_card_style)
+    check("_card_frames" in _set_s43 and "f.configure(style=" in _set_s43,
+          "43: E _set_card_style 同步遍历内部容器")
+
+    # 交叉校验：__init__ 里创建的每个 ttk.Frame 变量都必须出现在
+    # _card_frames 中。只验结构会漏掉"元组写空/漏列"这类真实错误。
+    # master 可能是 body/info/right 等任意层级，故不限定首参
+    _inner43 = set(re.findall(r"(\w+)\s*=\s*ttk\.Frame\(\s*\w+", _src_init43))
+    _listed43 = set()
+    _cf43 = re.search(r"self\._card_frames\s*=\s*\((.*?)\)", _src_init43, re.S)
+    if _cf43:
+        _listed43 = set(re.findall(r"\b(\w+)\b", _cf43.group(1)))
+    _missing43 = sorted(_inner43 - _listed43)
+    check(not _missing43,
+          "43: E 全部内部 ttk 容器已登记(漏: %s)" % ("; ".join(_missing43) or "-"))
+    check(len(_inner43) >= 7,
+          "43: E 交叉校验取到足够容器样本(实际 %d 个)" % len(_inner43))
+
+    assert len(failures) == _fail_base, "test_43: 本节有断言失败"
+
+
+TESTS = [test_1, test_2, test_3_run_now, test_2b_D_mtime, test_3b, test_3c_interval_last_run, test_4, test_5_save, test_6_M4, test_7_2s, test_8_M10_baseline, test_9_L4, test_10_CLI_run_cli, test_11_S1_SE1, test_12_include, test_13_interval_next_run, test_14_run_now, test_15_daily, test_16_logger, test_17, test_18_config_baseline, test_19_GUI, test_20_utils_paths, test_21_utils_timeutil, test_22_scanner, test_23_config_Task, test_24_logger_close, test_25_GUI_mock, test_26_run_now_next_run, test_27_fail_count, test_28_mkdir_type_conflict, test_29_F4_interval, test_30_F5_daily, test_31_F6_baseline, test_32_C1_C2, test_33_tray_autostart, test_34_fast_FAT32, test_35_vs_skip, test_36_refactor_regress, test_37_ui_review_fixes, test_38_app_split_structure, test_39_from_dict_boundary, test_40_monthly, test_41_review_improvements, test_42_shortcut_dataloss, test_43_line_quality]
 
 if __name__ == "__main__":
     import traceback

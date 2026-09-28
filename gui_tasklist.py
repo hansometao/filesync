@@ -71,6 +71,18 @@ def _short_path(p, max_len=36):
     return head + "..." + tail
 
 
+def _switch_radius(ch):
+    # type: (int) -> int
+    """开关滑块半径（按轨道高推导，纯函数可无头测试）。
+
+    轨道上下各留 2px，轨道高 = ch - 8。滑块半径须由轨道高反推而非 Canvas
+    高：按 ch//2-2 算（ch=24 → r=10，直径 20）会比轨道（16px）高出 4px，
+    白球上下各溢出 2px 压出轨道边缘。这里再留 1px 呼吸位使滑块不贴边。
+    """
+    track_h = ch - 8
+    return max(1, track_h // 2 - 1)
+
+
 # ======================================================================
 #  TaskCard — 单张任务卡片（独立 Frame，可嵌入 Canvas 滚动容器）
 # ======================================================================
@@ -84,19 +96,33 @@ class TaskCard(ttk.Frame):
 
     def __init__(self, master, app, task_id):
         # type: (tk.Widget, Any, str) -> None
-        super().__init__(master, style="Card.TFrame", padding=(14, 10))
+        # 卡片本体 padding=0：ttk.Frame 的 -padding 同时充当 place 的坐标原点
+        # 与内边距，padding 非零时选中指示条 place(x=0, relheight=1.0) 会落在
+        # x=14/y=10 处、且高度只算 padding 后的内容高，永远贴不到卡片左缘。
+        # 故把内缩移到内层 body，边框交给本体、内容布局交给 body。
+        super().__init__(master, style="Card.TFrame", padding=0)
         self._app = app
         self._id = task_id
 
+        # ---- 选中指示条：左侧 4px 主色竖条 ----
+        # 先于 body 创建并用 place 悬浮（不参与 pack，不挤压内容）。
+        # 高度用 relheight 跟随卡片实测高度——写死像素会在卡片变高/变矮时
+        # 越界，曾用 height=200 而卡片仅 ~70px 高，导致竖线横穿后续卡片。
+        self._sel_bar = tk.Frame(self, bg=C_BRAND, width=4)
+
+        # ---- 内层 body：承载内容内缩 ----
+        body = ttk.Frame(self, style="Card.TFrame", padding=(14, 10))
+        body.pack(fill=tk.BOTH, expand=True)
+
         # ---- 左侧：圆形开关（Canvas 自绘，比 Checkbutton 好看） ----
-        self._sw_canvas = tk.Canvas(self, width=44, height=24,
+        self._sw_canvas = tk.Canvas(body, width=44, height=24,
                                     bg=C_CARD_BG, highlightthickness=0,
                                     bd=0)
         self._sw_canvas.pack(side=tk.LEFT, padx=(0, 12))
         self._sw_canvas.bind("<Button-1>", self._on_toggle_switch)
 
         # ---- 中间信息区 ----
-        info = ttk.Frame(self, style="Card.TFrame")
+        info = ttk.Frame(body, style="Card.TFrame")
         info.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         # 名称行：任务名 + 模式徽标（单向镜像/双向同步）
@@ -129,7 +155,7 @@ class TaskCard(ttk.Frame):
         self._sched_lbl.pack(side=tk.LEFT)
 
         # ---- 右侧：上层=状态+下次运行，下层=操作按钮 ----
-        right = ttk.Frame(self, style="Card.TFrame")
+        right = ttk.Frame(body, style="Card.TFrame")
         right.pack(side=tk.RIGHT, padx=(8, 0))
 
         # 上层：状态标记 + 下次运行（水平紧凑排列）
@@ -168,7 +194,7 @@ class TaskCard(ttk.Frame):
         # 若在此对 _sw_canvas 再绑 <Button-1>，会覆盖 __init__ 中开关的切换
         # 绑定，导致开关失效；且会绑 <Double-Button-1> 让快速点两下开关误触
         # 同步。开关仅保留第 98 行的切换绑定与单独右键菜单。
-        for w in (self, info, name_row, self._name_lbl,
+        for w in (self, body, info, name_row, self._name_lbl,
                   self._mode_lbl, self._path_lbl, self._sched_lbl, right,
                   self._next_lbl, self._btn_frame, self._status_lbl):
             try:
@@ -193,7 +219,7 @@ class TaskCard(ttk.Frame):
         # 避免高频重绘抖动；选中态不参与（保留选中底色）
         self._hover = False
         self._hover_after = None  # type: Optional[str]
-        self._hover_widgets = (self, info, name_row, self._name_lbl,
+        self._hover_widgets = (self, body, info, name_row, self._name_lbl,
                                self._mode_lbl, self._path_lbl, self._sched_lbl,
                                self._sched_sep, right, self._next_lbl,
                                self._btn_frame, self._status_lbl)
@@ -209,8 +235,22 @@ class TaskCard(ttk.Frame):
                               self._sched_lbl, self._sched_sep, self._next_lbl,
                               self._status_lbl)
 
-        # ---- 选中指示条：左侧 4px 主色竖条（place 悬浮，不参与 pack 布局） ----
-        self._sel_bar = tk.Label(self, bg=C_BRAND, width=3, height=200)
+        # 卡片内所有 ttk 容器：ttk.Frame 背景不透明，style 固定在
+        # Card.TFrame 就不会跟随卡片自身 style 变化——选中/悬停时卡片本体
+        # 变淡青绿而这些容器仍为白底，文字之间露出白色间隙（斑驳感）。
+        # 故统一登记，set_selected/_apply_hover/_on_hover_leave 一并切换。
+        self._card_frames = (body, info, name_row, detail_row,
+                             right, info_row, self._btn_frame)
+
+    def _set_card_style(self, style_name):
+        # type: (str) -> None
+        """同步切换卡片本体与全部内部 ttk 容器的样式。"""
+        try:
+            self.configure(style=style_name)
+            for f in self._card_frames:
+                f.configure(style=style_name)
+        except tk.TclError:
+            pass
 
     # ---- 悬停高亮 ----
     def _on_hover_enter(self, _evt=None):
@@ -236,7 +276,7 @@ class TaskCard(ttk.Frame):
             return
         # 悬停已生效后离开：恢复白底
         try:
-            self.configure(style="Card.TFrame")
+            self._set_card_style("Card.TFrame")
             for w in self._hover_labels:
                 try:
                     w.configure(bg=C_CARD_BG)
@@ -252,7 +292,7 @@ class TaskCard(ttk.Frame):
         if self._selected or not self._hover:
             return
         try:
-            self.configure(style="CardHover.TFrame")
+            self._set_card_style("CardHover.TFrame")
             for w in self._hover_labels:
                 try:
                     w.configure(bg=C_CARD_HOVER)
@@ -397,8 +437,7 @@ class TaskCard(ttk.Frame):
         c.delete("all")
         cw = int(c["width"])
         ch = int(c["height"])
-        r = ch // 2 - 2
-        # 轨道
+        # 轨道（上下各留 2px）
         track_x1 = 2
         track_x2 = cw - 2
         track_y1 = 4
@@ -406,7 +445,8 @@ class TaskCard(ttk.Frame):
         c.create_oval(track_x1, track_y1, track_x2, track_y2,
                       fill=(C_SWITCH_ON if on else C_SWITCH_OFF),
                       outline="")
-        # 滑块
+        # 滑块：半径由轨道高反推，保证不溢出轨道上下缘
+        r = _switch_radius(ch)
         if on:
             cx = track_x2 - r - 1
         else:
@@ -424,7 +464,7 @@ class TaskCard(ttk.Frame):
         brand_light = C_DARK_BRAND_LIGHT if dark else C_BRAND_LIGHT
         card_bg = C_DARK_CARD_BG if dark else C_CARD_BG
         if sel:
-            self.configure(style="CardSelected.TFrame")
+            self._set_card_style("CardSelected.TFrame")
             for w in (self._name_lbl, self._mode_lbl, self._path_lbl,
                       self._sched_lbl, self._next_lbl, self._status_lbl,
                       self._sw_canvas):
@@ -433,11 +473,14 @@ class TaskCard(ttk.Frame):
                 except tk.TclError:
                     pass
             try:
-                self._sel_bar.place(x=0, y=0, height=200, width=4)
+                # relheight=1.0 让竖条精确贴合卡片全高（含边框），随窗口缩放与
+                # 内容变化自动跟随；写死像素会在卡片高度与之不符时溢出并压到
+                # 相邻卡片上（曾用 height=200 而卡片仅 ~70px）
+                self._sel_bar.place(x=0, y=0, relheight=1.0, width=4)
             except tk.TclError:
                 pass
         else:
-            self.configure(style="Card.TFrame")
+            self._set_card_style("Card.TFrame")
             for w in (self._name_lbl, self._mode_lbl, self._path_lbl,
                       self._sched_lbl, self._next_lbl, self._status_lbl,
                       self._sw_canvas):
