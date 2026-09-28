@@ -38,11 +38,22 @@ _lock_file = None          # type: Optional[Any]         # POSIX flock 文件句
 _wake_event = None         # type: Optional[int]         # Windows 命名事件句柄
 _wake_marker_path = None   # type: Optional[str]         # POSIX 唤起标记文件路径
 _start_wall = 0.0          # type: float                 # 占坑时刻（墙钟秒）
+_wake_thread = None        # type: Optional[threading.Thread]  # 监听线程引用
+# 监听线程的停止信号：进程退出前必须让监听线程主动结束，否则它会带着
+# 阻塞中的调用撞上解释器 finalization（见 stop_wakeup_listener 说明）
+_stop = threading.Event()  # type: threading.Event
 
 # Win32 常量
 _ERROR_ALREADY_EXISTS = 183
 _WAIT_OBJECT_0 = 0
-_INFINITE = 0xFFFFFFFF
+_WAIT_TIMEOUT = 0x00000102
+
+# 监听循环的节流参数：都必须是**有限**值。
+# 曾经用 _INFINITE(0xFFFFFFFF) 做等待超时，导致监听线程带着这次阻塞撞上
+# 解释器 finalization（PyEval_RestoreThread: NULL tstate），故此处不再定义
+# _INFINITE 常量，避免被误用回去。
+_WAKE_WIN_TIMEOUT = 500        # Win32 等待超时（毫秒）
+_WAKE_POLL_INTERVAL = 1.0      # POSIX 轮询间隔（秒）
 
 
 def acquire_single_instance():
@@ -94,16 +105,62 @@ def start_wakeup_listener(callback):
     callback 在监听线程中被调用，须由调用方保证线程安全
     （GUI 传 lambda: app._ui_put(...) 经 UI 队列投递主线程）。
     """
+    global _wake_thread
     if not _acquired:
         return
     if sys.platform == "win32" and _wake_event is not None:
+        _stop.clear()
         t = threading.Thread(target=_win_wait_loop, args=(callback,),
                              name="singleinstance-wake", daemon=True)
+        _wake_thread = t
         t.start()
     elif sys.platform in ("linux", "darwin") and _wake_marker_path is not None:
+        _stop.clear()
         t = threading.Thread(target=_posix_wait_loop, args=(callback,),
                              name="singleinstance-wake", daemon=True)
+        _wake_thread = t
         t.start()
+
+
+def stop_wakeup_listener(timeout=2.0):
+    # type: (float) -> None
+    """停止唤起监听线程（进程退出前调用）。幂等，绝不抛异常。
+
+    为什么必须有这一步：监听线程虽为 daemon，但一旦启动就阻塞在等待调用
+    里（Windows 为 WaitForSingleObject，POSIX 为轮询睡眠）。进程退出时
+    mainloop() 返回后解释器进入 finalization，daemon 线程若仍阻塞在其中，
+    从该调用返回后会尝试恢复已被销毁的 thread state，触发 CPython 3.13
+    的致命检查：
+
+        Fatal Python error: PyEval_RestoreThread: NULL tstate
+
+    该错误必现（线程启动后每次退出都会撞上），且发生在解释器收尾阶段，
+    常规 try/except 与日志都拦不住。修复方式是在 mainloop 返回后、解释器
+    真正收尾前让线程主动结束：置 _stop、唤醒阻塞中的等待、有限超时 join。
+    """
+    global _wake_thread
+    _stop.set()
+    # 唤醒可能正阻塞在 WaitForSingleObject 的线程，让它立刻醒来检查 _stop
+    if sys.platform == "win32" and _wake_event:
+        try:
+            import ctypes as _ct
+            _ct.windll.kernel32.SetEvent(_wake_event)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+    t = _wake_thread
+    if t is not None:
+        try:
+            t.join(timeout)
+        except Exception:
+            pass
+        if t.is_alive():
+            # 有界等待超时：仍不阻塞退出（线程是 daemon，解释器会回收）
+            try:
+                get_logger().warn("唤起监听线程未在 %.1fs 内停止(不影响退出)"
+                                  % timeout)
+            except Exception:
+                pass
+        _wake_thread = None
 
 
 # ---------- Windows ----------
@@ -149,10 +206,17 @@ def _win_wait_loop(callback):
     kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
     kernel32.ResetEvent.restype = wintypes.BOOL
     kernel32.ResetEvent.argtypes = [wintypes.HANDLE]
-    while True:
-        rc = kernel32.WaitForSingleObject(_wake_event, _INFINITE)
+    while not _stop.is_set():
+        # 有限超时而非 _INFINITE：循环需周期性醒来检查 _stop，
+        # 否则进程退出时线程会带着这次阻塞撞上解释器 finalization
+        # （PyEval_RestoreThread: NULL tstate，CPython 3.13 致命错误）
+        rc = kernel32.WaitForSingleObject(_wake_event, _WAKE_WIN_TIMEOUT)
+        if _stop.is_set():
+            return
+        if rc == _WAIT_TIMEOUT:
+            continue        # 超时：回到循环顶部复查停止标志
         if rc != _WAIT_OBJECT_0:
-            return  # 等待异常：退出监听（唤起功能降级失效，不影响其他功能）
+            return            # 等待异常：退出监听（唤起降级，不影响其他功能）
         kernel32.ResetEvent(_wake_event)
         try:
             callback()
@@ -211,8 +275,11 @@ def _posix_wait_loop(callback):
     baseline = _start_wall
     if marker is None:
         return
-    while True:
-        time.sleep(1.0)
+    while not _stop.is_set():
+        # _stop.wait 而非 time.sleep：前者被置位时立即返回，退出无需等满
+        # 一个轮询周期（与 Win32 分支同构，保证退出时线程能及时结束）
+        if _stop.wait(_WAKE_POLL_INTERVAL):
+            return
         try:
             m = os.path.getmtime(marker)
         except OSError:

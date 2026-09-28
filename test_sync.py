@@ -3515,7 +3515,114 @@ def test_45_card_edge():
     assert len(failures) == _fail_base, "test_45: 本节有断言失败"
 
 
-TESTS = [test_1, test_2, test_3_run_now, test_2b_D_mtime, test_3b, test_3c_interval_last_run, test_4, test_5_save, test_6_M4, test_7_2s, test_8_M10_baseline, test_9_L4, test_10_CLI_run_cli, test_11_S1_SE1, test_12_include, test_13_interval_next_run, test_14_run_now, test_15_daily, test_16_logger, test_17, test_18_config_baseline, test_19_GUI, test_20_utils_paths, test_21_utils_timeutil, test_22_scanner, test_23_config_Task, test_24_logger_close, test_25_GUI_mock, test_26_run_now_next_run, test_27_fail_count, test_28_mkdir_type_conflict, test_29_F4_interval, test_30_F5_daily, test_31_F6_baseline, test_32_C1_C2, test_33_tray_autostart, test_34_fast_FAT32, test_35_vs_skip, test_36_refactor_regress, test_37_ui_review_fixes, test_38_app_split_structure, test_39_from_dict_boundary, test_40_monthly, test_41_review_improvements, test_42_shortcut_dataloss, test_43_line_quality, test_44_card_layout, test_45_card_edge]
+def test_46_wakeup_listener_shutdown():
+    # type: () -> None
+    """自测节 46. 唤起监听线程退出：修复 PyEval_RestoreThread: NULL tstate
+
+    根因：_win_wait_loop 以 daemon=True 启动后永久阻塞在
+    WaitForSingleObject(_wake_event, _INFINITE)，且无任何停止机制。
+    mainloop() 返回后解释器进入 finalization，该 daemon 线程从 ctypes
+    阻塞调用返回并尝试恢复已销毁的 thread state，触发 CPython 3.13 的
+    致命检查 PyEval_RestoreThread: NULL tstate。必现（线程启动即永久阻塞）。
+    """
+    _fail_base = len(failures)
+    print("[46] 唤起监听线程退出（NULL tstate 致命错误）")
+    import inspect
+
+    import singleinstance as _si
+
+    # ============ A. 停止机制存在 ============
+    check(hasattr(_si, "stop_wakeup_listener"),
+          "46: A 提供 stop_wakeup_listener 停止入口")
+    check(hasattr(_si, "_stop") and hasattr(_si._stop, "is_set"),
+          "46: A 存在 _stop 停止事件")
+    check(getattr(_si, "_WAKE_WIN_TIMEOUT", None) is not None,
+          "46: A 定义 Win32 等待超时（不得用 _INFINITE）")
+    check(getattr(_si, "_WAKE_POLL_INTERVAL", None) is not None,
+          "46: A 定义 POSIX 轮询间隔常量")
+    check(getattr(_si, "_WAIT_TIMEOUT", None) is not None,
+          "46: A 定义 _WAIT_TIMEOUT（区别于 _WAIT_OBJECT_0）")
+
+    # ============ B. Win32 循环不得阻塞在无限等待 ============
+    _win46 = inspect.getsource(_si._win_wait_loop)
+    # 语义判定：等待超时必须是有限值。0xFFFFFFFF 即 Win32 的 INFINITE，
+    # 只匹配标识符 _INFINITE 会被等价的字面量绕过（曾如此）。
+    _code_win46 = "\n".join(l.split("#")[0] for l in _win46.splitlines())
+    check("0xFFFFFFFF" not in _code_win46,
+          "46: B Win32 循环不使用 0xFFFFFFFF(Win32 INFINITE)做等待超时")
+    check("_WAKE_WIN_TIMEOUT" in _win46,
+          "46: B Win32 循环使用有限超时以便轮询停止标志")
+    check("_stop" in _win46,
+          "46: B Win32 循环检查 _stop 停止标志")
+    check("_stop.is_set()" in _win46,
+          "46: B Win32 循环在唤醒后先检查 _stop 再回调")
+    # 超时常量本身必须是有限正整数
+    check(0 < int(_si._WAKE_WIN_TIMEOUT) < 0xFFFFFFFF,
+          "46: B _WAKE_WIN_TIMEOUT=%d 为有限正整数" % _si._WAKE_WIN_TIMEOUT)
+
+    # ============ C. POSIX 循环可被 _stop 打断（运行时验证）==========
+    _pos46 = inspect.getsource(_si._posix_wait_loop)
+    check("_stop" in _pos46, "46: C POSIX 循环检查 _stop")
+    check("_stop.wait(" in _pos46,
+          "46: C POSIX 用 Event.wait 而非 time.sleep（可被立即唤醒）")
+
+    # 运行时：启动 → 存活 → stop → 退出（POSIX 分支本机可跑）
+    _saved46 = [_si._acquired, _si._wake_marker_path, _si._start_wall,
+                _si._WAKE_POLL_INTERVAL, _si._stop, getattr(_si, "_wake_thread", None)]
+    import tempfile as _tf46
+    _dir46 = _tf46.mkdtemp(prefix="si46_")
+    _marker46 = os.path.join(_dir46, "wake")
+    try:
+        _si._acquired = True
+        _si._wake_marker_path = _marker46
+        _si._start_wall = time.time()
+        _si._WAKE_POLL_INTERVAL = 0.01
+        _si._stop.clear()
+        _hits46 = []
+        _si.start_wakeup_listener(lambda: _hits46.append(1))
+        _th46 = getattr(_si, "_wake_thread", None)
+        check(_th46 is not None, "46: C 记录了监听线程引用 _wake_thread")
+        if _th46 is not None:
+            check(_th46.daemon, "46: C 监听线程仍为 daemon（不阻塞进程退出）")
+            time.sleep(0.12)
+            check(_th46.is_alive(), "46: C 未设停止标志时线程持续运行")
+            _si.stop_wakeup_listener()
+            check(not _th46.is_alive(),
+                  "46: C stop_wakeup_listener 后线程已退出(不死等 join)")
+            check(_th46.join(0.1) is None, "46: C 线程可在超时内 join 干净结束")
+        # 幂等：未启动时/重复调用均不应抛异常
+        try:
+            _si._wake_thread = None
+            _si.stop_wakeup_listener()
+            _si.stop_wakeup_listener()
+            check(True, "46: C stop_wakeup_listener 幂等且未启动时不抛异常")
+        except Exception as e:
+            check(False, "46: C stop_wakeup_listener 应幂等: %s" % e)
+    finally:
+        (_si._acquired, _si._wake_marker_path, _si._start_wall,
+         _si._WAKE_POLL_INTERVAL, _si._stop) = _saved46[:5]
+        if getattr(_si, "_wake_thread", None) is not None:
+            _si._stop.set()
+            try:
+                _si._wake_thread.join(0.5)
+            except Exception:
+                pass
+        _si._wake_thread = _saved46[5]
+        shutil.rmtree(_dir46, ignore_errors=True)
+
+    # ============ D. 退出流程必须调用停止 ============
+    import main as _main46
+    _src46 = inspect.getsource(_main46.main)
+    check("stop_wakeup_listener" in _src46,
+          "46: D main() 退出路径调用 stop_wakeup_listener")
+    check(re.search(r"try:.*?root\.mainloop\(\).*?finally:.*?stop_wakeup_listener",
+                    _src46, re.S) is not None,
+          "46: D stop_wakeup_listener 在 finally 中(mainloop 抛异常也会执行)")
+
+    assert len(failures) == _fail_base, "test_46: 本节有断言失败"
+
+
+TESTS = [test_1, test_2, test_3_run_now, test_2b_D_mtime, test_3b, test_3c_interval_last_run, test_4, test_5_save, test_6_M4, test_7_2s, test_8_M10_baseline, test_9_L4, test_10_CLI_run_cli, test_11_S1_SE1, test_12_include, test_13_interval_next_run, test_14_run_now, test_15_daily, test_16_logger, test_17, test_18_config_baseline, test_19_GUI, test_20_utils_paths, test_21_utils_timeutil, test_22_scanner, test_23_config_Task, test_24_logger_close, test_25_GUI_mock, test_26_run_now_next_run, test_27_fail_count, test_28_mkdir_type_conflict, test_29_F4_interval, test_30_F5_daily, test_31_F6_baseline, test_32_C1_C2, test_33_tray_autostart, test_34_fast_FAT32, test_35_vs_skip, test_36_refactor_regress, test_37_ui_review_fixes, test_38_app_split_structure, test_39_from_dict_boundary, test_40_monthly, test_41_review_improvements, test_42_shortcut_dataloss, test_43_line_quality, test_44_card_layout, test_45_card_edge, test_46_wakeup_listener_shutdown]
 
 if __name__ == "__main__":
     import traceback

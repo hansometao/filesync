@@ -215,7 +215,14 @@ def main():
     singleinstance.start_wakeup_listener(
         lambda: app._ui_put(app._restore_from_tray))
     root.protocol("WM_DELETE_WINDOW", app.on_close)
-    root.mainloop()
+    try:
+        root.mainloop()
+    finally:
+        # 必须在 mainloop 返回后、解释器收尾前停掉唤起监听线程：它是 daemon
+        # 但阻塞在等待调用里，若带着阻塞进入 finalization，CPython 3.13 会
+        # 抛致命错误 PyEval_RestoreThread: NULL tstate（必现，且 try/except
+        # 与日志都拦不住）。放 finally 保证 mainloop 抛异常时同样执行。
+        singleinstance.stop_wakeup_listener()
 
 
 if __name__ == "__main__":
