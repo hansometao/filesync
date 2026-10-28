@@ -816,6 +816,16 @@ def apply_diff(task, diff_result, conflict_policy=None, self_paths=None,
         task.last_status = "无需同步"
         task.last_summary = "无差异"
         logger.info("任务[%s] 无需同步" % task.name)
+        # 双向同步：无差异也重建 baseline。否则"两侧内容一致但 baseline 为空/
+        # 缺失条目"（如 baseline 损坏重置、首同步即同内容）的场景下，每次
+        # 运行都把两侧判 added+added 走内容哈希全量比对，永无收敛。重建
+        # 走 reuse 路径（size+mtime 与旧条目一致直接沿用哈希），仅首次补齐
+        # 有成本，此后每轮 classify 走 mtime 快路径。
+        if task.mode == MODE_TWO_WAY and dst_snap is not None:
+            task.baseline = build_baseline_after(
+                task, os.path.abspath(task.target), self_paths=self_paths,
+                snap=dst_snap, old_baseline=task.baseline or {},
+                cancel_event=cancel_event)
         return {"diff": diff_result, "logs": [], "changed": False, "fail_count": 0}
     policy = conflict_policy or task.conflict_policy
     if policy == CONFLICT_ASK and on_ask is None:

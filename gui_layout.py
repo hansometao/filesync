@@ -114,7 +114,9 @@ class LayoutMixin(object):
         brand_right = tk.Frame(brand, bg=C_BRAND)
         brand_right.pack(side=tk.RIGHT, padx=12)
 
-        self._dark_btn = ttk.Button(brand_right, text="浅色",
+        # 初始浅色模式：按钮文案显示可切换的目标（"深色"）；
+        # _toggle_dark_mode 切换后按当前模式回填对应文案
+        self._dark_btn = ttk.Button(brand_right, text="深色",
                                      style="Brand.TButton",
                                      command=self._toggle_dark_mode)
         self._dark_btn.pack(side=tk.LEFT, padx=(0, 6))

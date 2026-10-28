@@ -345,15 +345,16 @@ class TaskCard(ttk.Frame):
             return
         if self._selected:
             return
-        # 悬停已生效后离开：恢复白底
+        # 悬停已生效后离开：恢复卡片常态底色（深浅模式各自对应的卡片底）
         try:
             self._set_card_style("Card.TFrame")
+            bg = self._card_bg()
             for w in self._hover_labels:
                 try:
-                    w.configure(bg=C_CARD_BG)
+                    w.configure(bg=bg)
                 except tk.TclError:
                     pass
-            self._sw_canvas.configure(bg=C_CARD_BG)
+            self._sw_canvas.configure(bg=bg)
         except tk.TclError:
             pass
 
@@ -362,14 +363,17 @@ class TaskCard(ttk.Frame):
         self._hover_after = None
         if self._selected or not self._hover:
             return
+        # 悬停底色随主题走：深色下用深色 hover，否则标签会闪回浅色白底
+        hover_bg = (C_DARK_CARD_HOVER
+                    if getattr(self._app, "_dark_mode", False) else C_CARD_HOVER)
         try:
             self._set_card_style("CardHover.TFrame")
             for w in self._hover_labels:
                 try:
-                    w.configure(bg=C_CARD_HOVER)
+                    w.configure(bg=hover_bg)
                 except tk.TclError:
                     pass
-            self._sw_canvas.configure(bg=C_CARD_HOVER)
+            self._sw_canvas.configure(bg=hover_bg)
         except tk.TclError:
             pass
 
@@ -445,8 +449,11 @@ class TaskCard(ttk.Frame):
         except tk.TclError:
             return
         f_name, f_path, f_mode = self._measure_fonts()
-        # 卡片内边距(body 左右各 14) + 右侧区间距(8) + 开关(44) + 开关后间距(10)
-        avail = total - 28 - 8 - 44 - 10
+        # 卡片内边距(body 左右各 14) + 右侧固定区实测宽(含其 padx 8)
+        # + 开关(44) + 开关后间距(10)。右侧区必须按实测扣除：运行/编辑/
+        # 删除按钮组宽约 200px，漏扣会让省略号触发过晚，路径被裁得
+        # 无"…"可循（此前算了 right_w 却没用上）。
+        avail = total - 28 - (right_w + 8) - 44 - 10
         if avail <= 24:
             return
         # 名称需为模式徽标留出实测宽度

@@ -26,6 +26,7 @@ from tkinter import ttk, messagebox
 from config import Task, TaskStore, CONFLICT_ASK
 from sync_engine import perform_sync, apply_diff, finalize_sync
 from scanner import ScanCancelled
+from gui_diff import PREVIEW_LOG_MAX
 from logger import AppLogger
 from scheduler import Scheduler
 
@@ -181,13 +182,26 @@ class SyncFlowMixin(object):
         else:
             messagebox.showerror(title, msg)
 
+    # 预览清单落盘上限（常量单一来源在 gui_diff.PREVIEW_LOG_MAX，
+    # 供 DiffDialog 的"完整清单见日志"文案据实措辞）
+    _PREVIEW_LOG_MAX = PREVIEW_LOG_MAX
+
     def _diff_worker(self, task):
         # type: (Task) -> None
         try:
             res = perform_sync(task, logger=self.logger, self_paths=self.self_paths,
                                dry_run=True, progress=self._progress_cb,
                                cancel_event=self._cancel)
+            # 先投递预览回调再落盘清单：_log_preview 每行经日志回调入 UI
+            # 队列（drain 每 100ms 消费 100 条），大目录预览数千行若先落盘，
+            # 预览对话框会被队列积压推迟数秒才弹出
             self._ui_put(lambda: self._on_diff_ready(task, res))
+            try:
+                self._log_preview(task, res.get("diff"))
+            except Exception as e:
+                # 落盘失败不反噬扫描结果：外层 except 会把成功扫描误报
+                # 成"对比失败"，故单独兜底
+                self.logger.error("预览清单落盘失败: %s" % e)
         except ScanCancelled:
             self._release_manual(task.id)
             self._ui_put(lambda g=self._wait_gen: self._hide_wait(g))
@@ -199,6 +213,24 @@ class SyncFlowMixin(object):
             self._ui_put(lambda g=self._wait_gen: self._hide_wait(g))
             self._ui_put(lambda: self._popup_if_alive("error", "错误", "对比失败：%s" % e))
             self._ui_put(self._refresh_tasks)
+
+    def _log_preview(self, task, diff_result):
+        # type: (Task, Any) -> None
+        """把预览差异清单写入日志文件（worker 线程执行）。
+
+        DiffDialog 超 2000 条时提示"完整清单见日志"，预览路径的 logs
+        此前从不落盘，该提示失实。此处按动作逐行落盘（封顶 5000 条），
+        超限时以截断说明行收尾。
+        """
+        if diff_result is None or diff_result.is_empty():
+            return
+        self.logger.info("预览[%s]: %s" % (task.name, diff_result.summary()))
+        actions = diff_result.actions
+        for act in actions[:self._PREVIEW_LOG_MAX]:
+            self.logger.info("[预览] %s %s" % (act.detail, act.rel))
+        if len(actions) > self._PREVIEW_LOG_MAX:
+            self.logger.info("[预览] 共 %d 条动作，日志仅记录前 %d 条"
+                             % (len(actions), self._PREVIEW_LOG_MAX))
 
     def _on_diff_ready(self, task, res):
         # type: (Task, dict) -> None

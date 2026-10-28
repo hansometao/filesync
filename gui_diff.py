@@ -54,6 +54,11 @@ def deletion_warning_text(delete_count, rmdir_count=0):
 # 首次双向同步冲突预警阈值：冲突数达到该值才提示（少量冲突属正常首同步行为）
 FIRST_SYNC_CONFLICT_WARN = 10
 
+# 预览动作清单落盘上限（gui_workers._log_preview 共用同一来源）：
+# logger 每行一次 flush，无上限的超大目录预览会拖慢 worker 线程与磁盘；
+# DiffDialog 的"完整清单见日志"文案据此措辞——超限时如实注明截断
+PREVIEW_LOG_MAX = 5000
+
 
 def first_sync_conflict_warning(conflict_count, has_baseline):
     # type: (int, bool) -> Optional[str]
@@ -155,8 +160,15 @@ class DiffDialog(tk.Toplevel):
         self._tree = tree
         self._insert_actions(self._shown_actions)
         if len(self.diff.actions) > MAX_SHOW:
-            ttk.Label(frm, text="（共 %d 条动作，仅显示前 %d 条；完整清单见日志）"
-                      % (len(self.diff.actions), MAX_SHOW),
+            # 措辞与日志侧实际记录范围一致（gui_workers._log_preview 落盘
+            # 前 PREVIEW_LOG_MAX 条）：清单超日志上限时如实注明截断，
+            # 不再笼统宣称"完整清单见日志"
+            if len(self.diff.actions) > PREVIEW_LOG_MAX:
+                tail = "日志记录前 %d 条" % PREVIEW_LOG_MAX
+            else:
+                tail = "完整清单见日志文件"
+            ttk.Label(frm, text="（共 %d 条动作，仅显示前 %d 条；%s）"
+                      % (len(self.diff.actions), MAX_SHOW, tail),
                       style="Muted.TLabel").pack(anchor=tk.W)
 
         if not self.diff.actions:

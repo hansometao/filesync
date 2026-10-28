@@ -298,15 +298,19 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin, LayoutMixin):
             self._next_lbl_bar.config(text="")
 
         if full:
-            # 全量重建：销毁所有旧卡片，重新创建
+            # 全量重建：销毁所有旧卡片，重新创建。
+            # 选中集合不整体清空：_on_add/_on_edit 先设选中再调 full 刷新，
+            # 清空会让"新建/编辑后 Ctrl+R/Delete 提示请先选择"。改为按现存
+            # 任务收敛（悬空 id 剔除），重建后由下方"恢复选中态视觉"回填。
             for c in self._task_rows.values():
                 try:
                     c.destroy()
                 except tk.TclError:
                     pass
             self._task_rows.clear()
-            self._selected_ids.clear()
-            self._selected_id = None
+            self._selected_ids &= {t.id for t in tasks}
+            if self._selected_id not in self._selected_ids:
+                self._selected_id = next(iter(self._selected_ids), None)
             assert self._task_inner is not None
             for t in tasks:
                 card = TaskCard(self._task_inner, self, t.id)
@@ -471,6 +475,35 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin, LayoutMixin):
             else:
                 card.pack_forget()
 
+    def _visible_task_ids(self):
+        # type: () -> List[str]
+        """按当前搜索词 + 状态筛选返回可见任务的 id（保持 store 顺序）。
+
+        与 _apply_search_filter 共用同一匹配逻辑（改过滤规则时须同步），
+        供 ↑/↓ 键盘导航使用：被过滤隐藏的卡片不参与选中移动，
+        否则选中的是看不见的卡片，看起来像"按了没反应"。
+        """
+        tasks = list(self.store.snapshot())
+        kw = self._current_search_kw().lower()
+        filter_val = getattr(self, "_filter_var", None)
+        status_filter = filter_val.get() if filter_val is not None else "全部"
+        visible = []
+        for t in tasks:
+            match = True
+            if kw and not (kw in t.name.lower() or kw in t.source.lower() or kw in t.target.lower()):
+                match = False
+            if status_filter == "启用" and not t.enabled:
+                match = False
+            elif status_filter == "禁用" and t.enabled:
+                match = False
+            elif status_filter == "运行中" and not self.scheduler.is_task_running(t.id):
+                match = False
+            elif status_filter == "失败" and t.last_status != "失败":
+                match = False
+            if match:
+                visible.append(t.id)
+        return visible
+
     def _current_search_kw(self):
         # type: () -> str
         """当前生效的搜索关键词（占位提示视为空，去首尾空白）。"""
@@ -517,12 +550,16 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin, LayoutMixin):
 
     def _on_arrow(self, delta):
         # type: (int) -> None
-        """↑/↓ 在卡片列表中移动选中（替代 Treeview 键盘导航）。"""
+        """↑/↓ 在卡片列表中移动选中（替代 Treeview 键盘导航）。
+
+        仅在当前搜索/筛选下可见的任务间移动：隐藏卡片被选中时用户
+        看不到任何反馈，观感等同于按键失效。
+        """
         # 与快捷键同根因：root 级 bind 会收到输入控件内的方向键
         if getattr(self, "_in_text_input", None) is not None \
                 and self._in_text_input():
             return
-        ids = [t.id for t in self.store.snapshot()]
+        ids = self._visible_task_ids()
         if not ids:
             return
         if self._selected_id not in ids:
@@ -546,11 +583,13 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin, LayoutMixin):
     def _batch_enable(self, enabled):
         # type: (bool) -> None
         """批量启用/禁用选中任务。"""
+        skipped = []
         for tid in list(self._selected_ids):
             task = self.store.get(tid)
             if task is None:
                 continue
             if not self.scheduler.acquire(tid):
+                skipped.append(task.name)
                 continue
             try:
                 task.enabled = enabled
@@ -560,6 +599,11 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin, LayoutMixin):
             finally:
                 self.scheduler.release(tid)
         self._refresh_tasks(full=False)
+        if skipped:
+            self._popup_if_alive(
+                "info", "提示",
+                "以下任务正在运行中，未%s（待其完成后再操作）：\n%s"
+                % ("启用" if enabled else "禁用", "、".join(skipped)))
 
     def _batch_run(self):
         # type: () -> None
@@ -756,8 +800,11 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin, LayoutMixin):
             msg = "确定删除选中的 %d 个任务？\n%s" % (len(names), "、".join(names))
         if not messagebox.askyesno("确认", msg):
             return
+        skipped = []
         for tid in ids:
             if not self.scheduler.acquire(tid):
+                t = self.store.get(tid)
+                skipped.append(t.name if t else tid)
                 continue
             try:
                 self.store.remove(tid)
@@ -766,6 +813,11 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin, LayoutMixin):
         self._selected_ids.clear()
         self._selected_id = None
         self._refresh_tasks(full=True)
+        if skipped:
+            self._popup_if_alive(
+                "info", "提示",
+                "以下任务正在运行中，未删除（待其完成后再删）：\n%s"
+                % "、".join(skipped))
 
     def _toggle_task_enabled(self, task_id):
         # type: (str) -> None
@@ -982,6 +1034,12 @@ class App(SyncFlowMixin, TrayMenuMixin, CloseSeqMixin, LayoutMixin):
             return
         try:
             self._refresh_tasks(full=False)
+            # 状态筛选（运行中/失败）依赖任务运行期状态，状态变化不改变
+            # 任务成员集，_refresh_tasks 不会重应用过滤——此处随 tick 补齐，
+            # 使列表与筛选条件保持同步（其余筛选值本身变化即触发，无需处理）
+            filter_val = getattr(self, "_filter_var", None)
+            if filter_val is not None and filter_val.get() in ("运行中", "失败"):
+                self._apply_search_filter(self._current_search_kw())
         except Exception:
             import traceback
             try:
